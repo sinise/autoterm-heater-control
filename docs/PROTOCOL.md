@@ -147,6 +147,53 @@ frame took the heater from actively running to a full clean stop-and-idle
 cycle (~4 minutes) with zero fault, matching real button-press behavior
 exactly.
 
+## Byte-level corruption on the heater leg (open, unexplained)
+
+Confirmed across two independent real captures (an 8-hour overnight
+capture, and a later ~1-hour Bypass-mode capture -- add-on sending zero
+commands) that the heater->Pi byte stream intermittently garbles for
+roughly 20-260ms at a time, in short bursts happening on average every
+7-8 minutes (63 such bursts counted in the 8-hour capture; a comparable
+elevated rate of stray/unparsed bytes in the 1-hour Bypass capture too).
+**Confirmed not caused by anything this add-on sends**: it happened during
+the Bypass-mode window with zero commands in flight, on both the base
+18-byte `type0f` status frame and the 58-byte extended frame alike, and
+with no timing correlation to the quiet-gap/handshake logic above.
+
+The corruption has a specific, repeated signature rather than looking like
+scattered noise. Reconstructing the garbled bytes against the expected
+next reading (same fields, incrementing counters) lines up almost
+perfectly except for one thing: the frame's own `dev` byte (`0x04` or
+`0x02`) turns up **before** the `0xAA` start marker instead of after it,
+and the length-low byte vanishes entirely. E.g., one base-status instance:
+
+```
+expected: aa 04 12 00 0f 02 03 00 46 46 00 81 43 00 01 01 5c ff 01 00 00 ...
+observed: 04 aa -- 00 0f 02 03 00 46 46 00 81 43 00 01 01 5c ff 01 00 00 ...
+```
+
+Confirmed from the add-on's own relay code that stray (unframeable) bytes
+are forwarded to the panel byte-for-byte unmodified -- the filtering
+relay path does `out += ev[1]` for a stray event, same as a real frame.
+So this isn't the add-on's software dropping/eating bytes before they
+reach the panel: whatever's happening happens upstream of the Pi (on the
+wire, or in the USB-serial adapter/driver), and the panel receives the
+same corrupted bytes too. This is the leading candidate explanation for
+the panel's occasional "no communication" flicker, and it's independent
+of both the PUBR0/quiet-gap issue above and of debug mode entirely.
+
+Confirmed almost exclusively on the **heater** leg -- essentially never
+seen on the panel leg in either capture, which points at something
+specific to that one physical connection (adapter, cable, or grounding)
+rather than a protocol-level bug. Root cause not yet identified (real
+capture data, not guessed): could be electrical noise/marginal grounding
+on that leg, or a USB-serial adapter/driver quirk (some cheap USB-UART
+bridge chips are known to occasionally reorder or drop bytes at USB
+packet boundaries). Deprioritized rather than actively investigated
+further as of this writing -- if picking this up again, the next useful
+step is probably swapping the heater-leg adapter/cable and re-capturing,
+or instrumenting at a lower level than this project's own framer.
+
 ## Extended diagnostic-mode telemetry (dev `0x02`, type `0x01`, 58-byte payload)
 
 The vendor's own Windows diagnostic tool ("Autoterm Test") talks to the
