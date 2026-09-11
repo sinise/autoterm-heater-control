@@ -12,6 +12,50 @@ confirmed -- see its DOCS.md.
 Status: passive decoding and live command injection (start/stop, preheat,
 thermostat) are **working and verified against real hardware**.
 
+## Supported heaters
+
+The base protocol (start/stop/preheat/thermostat, status, fault code,
+temperatures) is confirmed against a real **Autoterm 5D / Flow 5**
+(internally `BINAR-5S`) unit and should work unmodified on anything
+sharing that same underlying hardware/firmware. The add-on's **Heater
+profile** option additionally selects model-specific formulas for the
+*extended telemetry* frame (fan speed, fuel pump frequency, more
+temperatures, named operating mode) across 19 vendor models, extracted
+directly from the vendor diagnostic tool's own per-model data files:
+
+| Vendor display name | Tested against real hardware? | Internal codename | Config value |
+|---|---|---|---|
+| AUTOTERM FLOW 5 | ✅ Tested | BINAR-5S | `autoterm_flow_5` |
+| BINAR-5S | ✅ Tested (byte-identical to Flow 5) | BINAR-5S | `binar_5s` |
+| BINAR-5S-NEXT | ✅ Tested (byte-identical to Flow 5) | BINAR-5S | `binar_5s_next` |
+| 14TC-10 MOLEX | Untested | 4TC-10 MOLEX | `14tc_10_molex` |
+| AUTOTERM AIR 2D | Untested | PLANAR-2MK | `autoterm_air_2d` |
+| AUTOTERM AIR 4D | Untested | PLANAR-44MK | `autoterm_air_4d` |
+| AUTOTERM AIR 8D | Untested | PLANAR-8D | `autoterm_air_8d` |
+| AUTOTERM AIR 9D | Untested | PLANAR-9D | `autoterm_air_9d` |
+| PLANAR-2 with flame sensor | Untested | PLANAR-2 with flame sensor | `planar_2_with_flame_sensor` |
+| PLANAR-2D | Untested | PLANAR-2D | `planar_2d` |
+| PLANAR-2MK | Untested | PLANAR-2MK | `planar_2mk` |
+| PLANAR-44D-S-P | Untested | PLANAR-44D-SP | `planar_44d_s_p` |
+| PLANAR-44MK | Untested | PLANAR-44MK | `planar_44mk` |
+| PLANAR-4D-S-P | Untested | PLANAR-4D | `planar_4d_s_p` |
+| PLANAR-4D | Untested | PLANAR-4D | `planar_4d` |
+| PLANAR-8D-S-P | Untested | PLANAR-8D | `planar_8d_s_p` |
+| PLANAR-9D | Untested | PLANAR-9D | `planar_9d` |
+| SPUTNIK-2 | Untested | SPUTNIK-2 | `sputnik_2` |
+| SPUTNIK-3 | Untested | Sputnik-3 | `sputnik_3` |
+
+**Only Flow 5, BINAR-5S, and BINAR-5S-NEXT are confirmed against real
+hardware** -- those three share one internal codename in the vendor's own
+data (byte-identical fields, not a separate guess). Every other row is
+read straight from the vendor tool's own per-model files and has **never
+been validated** against a real unit: byte offsets could be wrong, and
+it isn't even confirmed the extended-telemetry mechanism works the same
+way on that model at all. If you test one of the untested models,
+[open an issue](https://github.com/sinise/autoterm-heater-control/issues)
+with what you found -- see the add-on's `DOCS.md`, "Heater profile: other
+models", for the full detail and known limitations.
+
 ## What's in here
 
 | Path | Purpose |
