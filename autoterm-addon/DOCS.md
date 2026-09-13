@@ -478,11 +478,11 @@ Plus, from the debug-only features above:
   telemetry active is on): Mode of operation (named, e.g. "High", "middle",
   "glow plug warming up"), Mode code (numeric mirror, see below), Running
   time (extended), Defined revolutions, Measured revolutions, Fuel pump
-  frequency, Flame temperature, Liquid temperature (extended), Overheat
-  sensor temperature, Board temperature, Supply voltage, Fault (extended,
-  named), Fault code (extended, numeric mirror), Engine state, Relay
-  state, Fan current, Capture log file, Capture log size, Bypass log file,
-  Bypass log size
+  frequency, Heater output, Flame temperature, Liquid temperature
+  (extended), Overheat sensor temperature, Board temperature, Supply
+  voltage, Fault (extended, named), Fault code (extended, numeric mirror),
+  Engine state, Relay state, Fan current, Capture log file, Capture log
+  size, Bypass log file, Bypass log size
 - **Sensor** (always available): State code (numeric mirror of `State`),
   Heater profile (shows the active selection, `(NOT TESTED)` for anything
   but Flow 5 -- see "Heater profile: other models" above)
@@ -506,6 +506,12 @@ real capture -- see `docs/PROTOCOL.md`. The fault-code name table is a
 partial, lower-confidence addition -- only "no fault" (code 0) was actually
 observed in the reference capture; the rest of the names come from the
 vendor's own string table but haven't been confirmed against a real fault.
+
+**Heater output** is the one exception to "vendor's own formulas" above --
+it's this add-on's own assumption, not vendor data: output scales linearly
+with Fuel pump frequency, with 4.2Hz taken as 100% (so 2.1Hz reads 50%),
+clamped to 0-100%. Unconfirmed against any real spec; treat it as a rough
+indicator, not a calibrated wattage reading.
 
 ## Troubleshooting
 

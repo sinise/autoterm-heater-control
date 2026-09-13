@@ -2,6 +2,9 @@
 
 ## 3.1.0
 
+- Added **Heater output** (%, extended telemetry only): this add-on's own
+  linear estimate from Fuel pump frequency (4.2Hz = 100%), not a
+  vendor-reported field -- see DOCS.md.
 - **HEATER->PANEL passthrough no longer holds every frame for a full
   parse.** Every frame in that direction was being buffered until fully
   received (up to ~1 frame's worth of extra latency, ~60-100ms+ at 2400

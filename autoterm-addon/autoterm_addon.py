@@ -1002,6 +1002,14 @@ def decode_extended_payload(payload, profile):
     for key in ("ext_fuel_pump_hz", "ext_voltage"):
         if key in result:
             result[key] = round(result[key], 1)
+    if "ext_fuel_pump_hz" in result:
+        # Not vendor data like the slots above -- our own assumption
+        # (requested as such, not derived from any confirmed spec): output
+        # scales linearly with fuel pump frequency, 4.2Hz = 100%. Clamped
+        # to 0-100 since the raw frequency can read slightly outside that
+        # band during ignition/ramp transients.
+        pct = result["ext_fuel_pump_hz"] / 4.2 * 100
+        result["ext_output_pct"] = round(max(0.0, min(100.0, pct)), 0)
     if "ext_fault_code" in result:
         fault = int(result["ext_fault_code"])
         result["ext_fault_code"] = fault
@@ -2302,6 +2310,14 @@ def discovery_configs(profile):
         **base, "name": "Fuel pump frequency", "unique_id": f"{NODE_ID}_ext_fuel_pump_hz",
         "state_topic": STATE_TOPIC, "value_template": blank_to_none("ext_fuel_pump_hz"),
         "unit_of_measurement": "Hz", "icon": "mdi:gas-station-outline", "state_class": "measurement",
+    }))
+    entries.append((f"{DISCOVERY_PREFIX}/sensor/{NODE_ID}/ext_output_pct/config", {
+        # Not a vendor-reported field -- derived here assuming output scales
+        # linearly with fuel pump frequency, 4.2Hz = 100% (see
+        # decode_extended_payload()). Unconfirmed against a real spec.
+        **base, "name": "Heater output", "unique_id": f"{NODE_ID}_ext_output_pct",
+        "state_topic": STATE_TOPIC, "value_template": blank_to_none("ext_output_pct"),
+        "unit_of_measurement": "%", "icon": "mdi:gauge", "state_class": "measurement",
     }))
     entries.append((f"{DISCOVERY_PREFIX}/sensor/{NODE_ID}/ext_voltage/config", {
         **base, "name": "Supply voltage", "unique_id": f"{NODE_ID}_ext_voltage",
