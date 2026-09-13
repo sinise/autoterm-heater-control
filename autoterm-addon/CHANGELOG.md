@@ -1,5 +1,42 @@
 # Changelog
 
+## 3.1.0
+
+- **HEATER->PANEL passthrough no longer holds every frame for a full
+  parse.** Every frame in that direction was being buffered until fully
+  received (up to ~1 frame's worth of extra latency, ~60-100ms+ at 2400
+  baud) so the extended-telemetry frame could be filtered out -- even with
+  debug mode off, when that frame never appears at all. The physical
+  panel's own responsiveness was paying for filtering it almost never
+  needed. Now: true immediate byte-for-byte passthrough by default (same
+  as the PANEL->HEATER direction always had), switching to the buffered
+  filtering path only while it's actually needed -- debug mode streaming
+  the extended frame, or briefly right after this add-on injects a
+  command (see next item).
+- **Experimental:** the heater's ack to a just-injected command (Start/
+  Stop/Auto thermostat/Prevent freezing) is now withheld from reaching the
+  panel, on the theory that forwarding a reply to a request the panel
+  never made is the same class of problem that was confirmed to break it
+  for the extended-telemetry frame (see docs/PROTOCOL.md). There's no
+  field in the ack that distinguishes "reply to us" from "reply to the
+  real panel" -- injected frames use the same sender identity -- so this
+  is a 1.5s timing window after each injected send, not a certain match.
+  Watch the capture log if this matters to you; treat as unproven the way
+  the quiet-gap fix was.
+- **Auto thermostat and Prevent freezing now disable themselves the
+  moment the heater reports a fault**, instead of blindly re-issuing
+  `start thermostat` every time they next see it idle. Previously neither
+  loop looked at the fault byte at all. New entities: **Fault** (named,
+  populated without debug mode), **Fault active** (binary_sensor,
+  `device_class: problem` -- the natural trigger for a Home Assistant
+  automation/notification), and **Last fault code/Last fault/Last fault
+  time**, which keep showing the most recent fault after it clears so it
+  doesn't just vanish the moment the heater recovers. See DOCS.md for a
+  sample notification automation.
+
+(No keep-alive code remains anywhere in this add-on -- it was fully
+removed in 2.3.0 below, checked again while working on this release.)
+
 ## 3.0.0
 
 - **Renamed**: `Autoterm Heater Debug` -> `Autoterm Heater`, slug

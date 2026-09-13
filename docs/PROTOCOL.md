@@ -135,6 +135,21 @@ restart still happened. That rules out anything this add-on could ever
 send: it's the heater/panel's own native behavior, not a protocol
 detail this project is missing or getting wrong.
 
+**Likely mechanism, found afterward:** a real capture (Bypass off, Auto
+thermostat driving it) caught the `[2]` fault byte reading `25` for the
+entire cooldown-to-idle span of one of these self-stops, clearing back to
+`0` the moment the next `start thermostat` brought it running again. `25`
+is `"Temperature growing too fast"` in the vendor string table (see the
+fault-name tables below) -- unconfirmed against a real fault before this,
+but it fits: thermostat mode here never sends a power-level/duration, so
+if the heater has no external cabin-temp feedback to modulate against, it
+may just run at a fixed output until its own rate-of-rise safety trips,
+which would produce exactly this ~30-40 minute stop/restart cadence.
+Auto thermostat/Prevent freezing don't look at the fault byte before
+restarting -- they only check `state == idle` -- so this isn't specific
+to those loops; the real panel's own thermostat mode hitting the same
+safety trip is presumably why it self-restarts too.
+
 **Stop:**
 ```
 type03, empty payload
@@ -263,6 +278,27 @@ connected -- two distinct failure modes found, one fixed, one narrowed:**
      quiet-gap wait now applies to every injected command, not just
      `PUBR0`. As with the handshake fix, this narrows the window rather
      than proving it eliminated.
+   - Separately, the HEATER->PANEL relay direction was found to be holding
+     *every* frame (not just the extended one) for a full parse before
+     forwarding it -- unconditionally, whether or not there was anything to
+     filter -- adding real latency to the panel's own responsiveness even
+     with debug mode off. **Fixed from v3.1.0**: immediate byte-for-byte
+     forwarding by default (matching PANEL->HEATER, which always had it),
+     falling back to the buffered/filtering path only while debug mode is
+     streaming the extended frame or an injected command's ack is still
+     pending.
+   - **New, experimental in v3.1.0**: the heater's ack to an injected
+     command is also withheld from the panel now, on the same "the panel
+     never asked for this" reasoning as (1) above. There's no way to tell
+     "ack for us" from "ack for the real panel" from the frame alone --
+     injected frames use the same dev03 sender identity the real panel
+     does, so the heater can't distinguish them either -- so this is a
+     short timing window (1.5s) after each injected send, not a certain
+     match. One real capture: after injecting `type01`/`00 22`, the next
+     dev00/dev02 empty-payload frame arrived ~0.9s later. Unconfirmed
+     whether withholding it actually helps the panel; watch for it
+     mismatching (swallowing a frame the panel needed, or missing the real
+     ack) if picking this up again.
 
 Frame: `AA | 02 | 3a 00 | 01 | <58-byte payload> | crc16`. Indices below
 are 0-based into that 58-byte payload.

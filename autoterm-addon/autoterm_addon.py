@@ -1037,6 +1037,45 @@ def is_extended_telemetry_frame(raw):
     return len(raw) > 4 and raw[1] == 0x02 and raw[4] == 0x01 and len(raw) - 7 == 58
 
 
+def is_injection_ack_candidate(raw):
+    """A short ack-class frame from the heater (dev00 or dev02, empty
+    payload) -- the shape seen both for the heater's ack to the display's
+    own cabin-temp report and, going by timing alone, its ack to a command
+    this add-on just injected. Injected frames use the same dev03 sender
+    identity as the real panel, so the heater can't tell the two apart
+    either -- there's no field to match on, only timing (see
+    StatusModel.arm_reply_suppression()). Only treated as "ours" within a
+    short window right after Commander sends something, not
+    unconditionally, to limit the chance of swallowing a genuine
+    display<->heater exchange that happens to land in that window."""
+    return len(raw) > 4 and raw[1] in (0x00, 0x02) and len(raw) - 7 == 0
+
+
+def heater_to_panel_should_filter(model):
+    """Whether the HEATER->PANEL relay needs to parse-before-forward right
+    now: either debug mode is on (the extended telemetry frame can appear
+    at any moment and must never reach the panel), or an injected command's
+    ack is still pending (see StatusModel.arm_reply_suppression()). Off
+    otherwise, so ordinary traffic gets true immediate passthrough."""
+    debug_enabled, _ = model.get_debug_settings()
+    return debug_enabled or model.should_suppress_reply()
+
+
+def make_heater_to_panel_filter(model):
+    """Per-frame drop decision for the HEATER->PANEL relay's filtering
+    path: always strip the extended telemetry frame, and additionally
+    swallow the one pending injection ack, if any (clearing the gate as
+    soon as it's used so nothing past that first match is affected)."""
+    def filter_fn(raw):
+        if is_extended_telemetry_frame(raw):
+            return True
+        if model.should_suppress_reply() and is_injection_ack_candidate(raw):
+            model.consume_reply_suppression()
+            return True
+        return False
+    return filter_fn
+
+
 def decode_status_payload(payload):
     """Heater's (dev04) 18-byte type0f payload -> named fields."""
     if len(payload) < 18:
@@ -1055,6 +1094,12 @@ def decode_status_payload(payload):
 
 def _iso(ts):
     return datetime.fromtimestamp(ts).strftime("%H:%M:%S.%f")[:-3]
+
+
+def _iso_dt(ts):
+    """Full ISO-8601 with UTC offset -- what HA's `timestamp` device_class
+    requires, unlike the HH:MM:SS.mmm _iso() above (log display only)."""
+    return datetime.fromtimestamp(ts).astimezone().isoformat()
 
 
 # --------------------------------------------------------------------------
@@ -1325,6 +1370,8 @@ class StatusModel:
         self.cabin_temp_ts = None
         self.last_frame_ts = None
         self.last_command = None
+        self.last_fault = None
+        self._suppress_reply_until = None
         persisted = load_persisted()
         self.preheat_minutes = persisted.get("preheat_minutes", preheat_minutes_default)
         self.debug_mode = persisted.get("debug_mode", debug_mode_default)
@@ -1341,6 +1388,13 @@ class StatusModel:
             if dev == 0x04 and type_ == 0x0F and len(payload) == 18:
                 self.status = decode_status_payload(payload)
                 self.status_ts = ts
+                fault_code = self.status.get("fault")
+                if fault_code and (self.last_fault is None or self.last_fault["code"] != fault_code):
+                    self.last_fault = {
+                        "code": fault_code,
+                        "name": self.profile["faults"].get(fault_code, f"unknown({fault_code})"),
+                        "ts": ts,
+                    }
             elif dev == 0x03 and type_ == 0x11 and len(payload) == 1:
                 self.cabin_temp = payload[0]
                 self.cabin_temp_ts = ts
@@ -1414,6 +1468,33 @@ class StatusModel:
         with self.lock:
             return self.last_frame_ts
 
+    def arm_reply_suppression(self):
+        """Called right after Commander writes an injected frame: the next
+        short ack-shaped frame the heater sends (see
+        is_injection_ack_candidate) is withheld from the HEATER->PANEL relay
+        for SUPPRESS_WINDOW seconds, on the theory that it's the heater's
+        ack to what we just sent rather than something the real panel
+        needs to see."""
+        with self.lock:
+            self._suppress_reply_until = time.time() + SUPPRESS_WINDOW
+
+    def should_suppress_reply(self):
+        with self.lock:
+            if self._suppress_reply_until is None:
+                return False
+            if time.time() >= self._suppress_reply_until:
+                self._suppress_reply_until = None
+                return False
+            return True
+
+    def consume_reply_suppression(self):
+        """Called once a candidate ack frame has actually been withheld --
+        clears the window immediately rather than waiting it out, so a
+        second, unrelated ack-shaped frame arriving moments later (e.g. the
+        display's own type11 report) isn't also swallowed."""
+        with self.lock:
+            self._suppress_reply_until = None
+
     def snapshot(self, auto_snapshot=None, pf_snapshot=None, capture_status=None,
                  bypass_log_status=None):
         auto_snapshot = auto_snapshot or {}
@@ -1448,6 +1529,20 @@ class StatusModel:
             }
             snap.update(self.status)
             snap.update(self.extended)
+            fault_code = self.status.get("fault")
+            snap["fault_active"] = bool(fault_code)
+            snap["fault_name"] = (
+                self.profile["faults"].get(fault_code, f"unknown({fault_code})")
+                if fault_code else None
+            )
+            if self.last_fault is not None:
+                snap["last_fault_code"] = self.last_fault["code"]
+                snap["last_fault_name"] = self.last_fault["name"]
+                snap["last_fault_time"] = _iso_dt(self.last_fault["ts"])
+            else:
+                snap["last_fault_code"] = None
+                snap["last_fault_name"] = None
+                snap["last_fault_time"] = None
             snap["auto_enabled"] = auto_snapshot.get("enabled")
             snap["auto_target"] = auto_snapshot.get("target")
             snap["auto_last_note"] = auto_snapshot.get("last_note")
@@ -1463,15 +1558,24 @@ class Relay(threading.Thread):
     """Transparent byte-for-byte passthrough in one direction, plus decoding
     and (if enabled) raw capture logging.
 
-    With no filter_fn, this forwards bytes immediately (before parsing) to
-    keep passthrough latency minimal -- the base add-on's proven behavior,
-    unchanged. With a filter_fn, it must parse *before* forwarding (holding
-    each frame until it's complete, up to ~1 frame's worth of extra
-    latency) so a matched frame can be withheld instead of written to dst
-    -- used for HEATER->PANEL to stop the extended telemetry frame from
-    ever reaching the physical panel (see is_extended_telemetry_frame)."""
+    Bytes are forwarded immediately, before parsing, whenever there's
+    nothing that might need withholding -- passthrough latency is then
+    whatever the OS/serial layer itself costs, not an extra frame's worth
+    of buffering. `should_filter_fn` (if given) is polled once per read
+    cycle; only while it returns True does this relay switch to parsing
+    each chunk into full frames *before* writing anything (holding up to
+    ~1 frame's worth of extra latency), so `frame_filter_fn` can withhold a
+    matched frame from dst entirely instead of forwarding it.
 
-    def __init__(self, name, sender_label, src, dst, dst_lock, model, capture_log, stop_evt, filter_fn=None):
+    Used for HEATER->PANEL, and deliberately scoped to only the moments
+    filtering is actually needed (debug mode streaming the extended frame,
+    or a just-injected command's ack still pending) rather than
+    unconditionally -- holding every single heater frame for a full parse,
+    all the time, was adding real latency to the panel's own display even
+    when there was nothing to filter (see docs/PROTOCOL.md)."""
+
+    def __init__(self, name, sender_label, src, dst, dst_lock, model, capture_log, stop_evt,
+                 should_filter_fn=None, frame_filter_fn=None):
         super().__init__(daemon=True, name=name)
         self.label = name
         self.sender_label = sender_label
@@ -1481,7 +1585,8 @@ class Relay(threading.Thread):
         self.model = model
         self.capture_log = capture_log
         self.stop_evt = stop_evt
-        self.filter_fn = filter_fn
+        self.should_filter_fn = should_filter_fn
+        self.frame_filter_fn = frame_filter_fn
         self.framer = Framer()
         self.error = None
 
@@ -1499,8 +1604,9 @@ class Relay(threading.Thread):
                 return
 
             ts = time.time()
+            filtering = self.should_filter_fn is not None and self.should_filter_fn()
 
-            if self.filter_fn is None:
+            if not filtering:
                 try:
                     with self.dst_lock:
                         self.dst.write(data)
@@ -1533,7 +1639,8 @@ class Relay(threading.Thread):
                 raw, crc_ok = ev[1], ev[2]
                 if crc_ok:
                     self.model.note_frame(ts, self.label, raw)
-                if crc_ok and self.filter_fn(raw):
+                drop = crc_ok and self.frame_filter_fn is not None and self.frame_filter_fn(raw)
+                if drop:
                     self.capture_log.frame(ts, self.sender_label, raw, crc_ok, note="NOT forwarded (filtered)")
                 else:
                     self.capture_log.frame(ts, self.sender_label, raw, crc_ok)
@@ -1560,6 +1667,12 @@ class Relay(threading.Thread):
 # level instead of duplicated per class).
 QUIET_GAP = 0.25
 MAX_EXTRA_WAIT = 2.0
+
+# How long the HEATER->PANEL relay withholds the next ack-shaped frame after
+# Commander injects something (see StatusModel.arm_reply_suppression() and
+# is_injection_ack_candidate()) -- generous relative to the ~0.9s ack delay
+# seen in a real capture, without leaving it armed indefinitely.
+SUPPRESS_WINDOW = 1.5
 
 
 def wait_for_quiet_bus(model, stop_evt):
@@ -1603,6 +1716,7 @@ class Commander:
             log.info("INJECT sent %s", frame.hex(" "))
             self.capture_log.raw_send(ts, "rpi", frame)
             self.model.note_command(f"sent {frame.hex(' ')}")
+            self.model.arm_reply_suppression()
             return True
         except Exception as e:
             log.error("INJECT failed %s: %r", frame.hex(" "), e)
@@ -1744,11 +1858,25 @@ class AutoThermostat(threading.Thread):
                 enabled, target = self.enabled, self.target
             if not enabled:
                 continue
+
+            # Checked before the action-rate-limit below, and independent of
+            # a fresh cabin-temp reading, so a fault gets a response within
+            # one POLL_INTERVAL rather than waiting out MIN_ACTION_INTERVAL
+            # or MAX_READING_AGE first.
+            snap = self.model.snapshot()
+            fault = snap.get("fault")
+            if fault:
+                note = f"fault {fault} ({snap.get('fault_name')}) -> disabling Auto thermostat"
+                log.error("AUTO %s", note)
+                self.configure(enabled=False)
+                with self.lock:
+                    self.last_note = note
+                continue
+
             now = time.time()
             if now - self.last_action_ts < self.MIN_ACTION_INTERVAL:
                 continue
 
-            snap = self.model.snapshot()
             cabin, age = snap["cabin_temp"], snap["cabin_temp_age"]
             state = snap.get("state")
             if cabin is None or age is None or age > self.MAX_READING_AGE or state is None:
@@ -1832,11 +1960,28 @@ class PreventFreezing(threading.Thread):
             if not enabled:
                 self.started_by_me = False
                 continue
+
+            # See AutoThermostat.run() for why this is checked before the
+            # rate-limit/staleness gates below. Disabling frost protection
+            # itself on a fault is a deliberate choice, not an oversight:
+            # blindly re-igniting into whatever just faulted seemed worse
+            # than surfacing it and leaving the heater alone -- flag via
+            # "Last fault"/an automation if this needs to escalate instead.
+            snap = self.model.snapshot()
+            fault = snap.get("fault")
+            if fault:
+                note = f"fault {fault} ({snap.get('fault_name')}) -> disabling Prevent freezing"
+                log.error("PREVENT-FREEZING %s", note)
+                self.configure(enabled=False)
+                self.started_by_me = False
+                with self.lock:
+                    self.last_note = note
+                continue
+
             now = time.time()
             if now - self.last_action_ts < self.MIN_ACTION_INTERVAL:
                 continue
 
-            snap = self.model.snapshot()
             cabin, age = snap["cabin_temp"], snap["cabin_temp_age"]
             state = snap.get("state")
             if cabin is None or age is None or age > self.MAX_READING_AGE or state is None:
@@ -1897,6 +2042,41 @@ def discovery_configs(profile):
         **base, "name": "Fault code", "unique_id": f"{NODE_ID}_fault",
         "state_topic": STATE_TOPIC, "value_template": blank_to_none("fault"),
         "icon": "mdi:alert-circle-outline", "entity_category": "diagnostic",
+    }))
+    entries.append((f"{DISCOVERY_PREFIX}/sensor/{NODE_ID}/fault_name/config", {
+        # Named mirror of "Fault code" using the same table as "Fault
+        # (extended, named)" below, but populated from the base 18-byte
+        # frame -- available without debug/extended telemetry turned on.
+        **base, "name": "Fault", "unique_id": f"{NODE_ID}_fault_name",
+        "state_topic": STATE_TOPIC, "value_template": blank_to_none("fault_name"),
+        "device_class": "enum", "options": profile_fault_name_options(profile),
+        "icon": "mdi:alert-circle-outline",
+    }))
+    entries.append((f"{DISCOVERY_PREFIX}/binary_sensor/{NODE_ID}/fault_active/config", {
+        **base, "name": "Fault active", "unique_id": f"{NODE_ID}_fault_active",
+        "state_topic": STATE_TOPIC,
+        "value_template": "{{ 'ON' if value_json.fault_active else 'OFF' }}",
+        "device_class": "problem",
+    }))
+    entries.append((f"{DISCOVERY_PREFIX}/sensor/{NODE_ID}/last_fault_code/config", {
+        # These three persist the most recent fault (code/name/when it
+        # started) even after it clears back to 0, so it stays visible
+        # instead of vanishing the moment the heater recovers -- see
+        # StatusModel.note_frame()/last_fault.
+        **base, "name": "Last fault code", "unique_id": f"{NODE_ID}_last_fault_code",
+        "state_topic": STATE_TOPIC, "value_template": blank_to_none("last_fault_code"),
+        "icon": "mdi:alert-circle-outline", "entity_category": "diagnostic",
+    }))
+    entries.append((f"{DISCOVERY_PREFIX}/sensor/{NODE_ID}/last_fault_name/config", {
+        **base, "name": "Last fault", "unique_id": f"{NODE_ID}_last_fault_name",
+        "state_topic": STATE_TOPIC, "value_template": blank_to_none("last_fault_name"),
+        "device_class": "enum", "options": profile_fault_name_options(profile),
+        "icon": "mdi:alert-circle-outline", "entity_category": "diagnostic",
+    }))
+    entries.append((f"{DISCOVERY_PREFIX}/sensor/{NODE_ID}/last_fault_time/config", {
+        **base, "name": "Last fault time", "unique_id": f"{NODE_ID}_last_fault_time",
+        "state_topic": STATE_TOPIC, "value_template": blank_to_none("last_fault_time"),
+        "device_class": "timestamp", "entity_category": "diagnostic",
     }))
     entries.append((f"{DISCOVERY_PREFIX}/sensor/{NODE_ID}/cabin_temp/config", {
         **base, "name": "Cabin temperature", "unique_id": f"{NODE_ID}_cabin_temp",
@@ -2220,7 +2400,9 @@ class Bridge:
             self.model, self._wire_log, self.stop_evt)
         self.heater_to_panel = Relay(
             "HEATER->PANEL", "heater", self.heater_ser, self.panel_ser, self.panel_lock,
-            self.model, self._wire_log, self.stop_evt, filter_fn=is_extended_telemetry_frame)
+            self.model, self._wire_log, self.stop_evt,
+            should_filter_fn=lambda: heater_to_panel_should_filter(self.model),
+            frame_filter_fn=make_heater_to_panel_filter(self.model))
 
         self.mqtt = mqtt.Client(client_id=f"{NODE_ID}-bridge", clean_session=True)
         if cfg.get("mqtt_username"):

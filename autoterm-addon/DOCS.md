@@ -370,7 +370,9 @@ heater is started (thermostat mode) whenever cabin temperature reaches the
 auto-thermostat climate entity is on or off, and regardless of a prior
 manual Stop.** That's the point of the feature: it can't be silently
 defeated by turning normal heating off or pressing Stop once -- only
-turning the Prevent freezing switch itself off disables it.
+turning the Prevent freezing switch itself off disables it, with one
+exception: a heater-reported fault also turns it off automatically (see
+"Faults" below). Re-enable it once the fault is dealt with.
 
 It won't fight anything else, though: it never stops a heater run it
 didn't start (so it doesn't interrupt the auto-thermostat's own comfort
@@ -385,14 +387,70 @@ seconds once cabin temperature is still at/below the floor. To actually
 stop the heater in that situation, turn off Prevent freezing first (or
 raise its target below the current cabin temperature).
 
+## Faults
+
+The heater reports a fault code in every status frame (`0` = no fault),
+independent of debug mode. This add-on surfaces it two ways:
+
+- **Fault** / **Fault code**: the *current* fault, named and numeric --
+  `Fault` reads "No faults" (or the fault's name) whenever the heater isn't
+  currently faulted.
+- **Fault active** (binary_sensor, `device_class: problem`): on exactly
+  while `Fault code` is non-zero. This is the entity to use as an
+  automation trigger, below.
+- **Last fault code** / **Last fault** / **Last fault time**: the most
+  recent fault's code, name, and when it *started* (not when it cleared) --
+  these keep their value even after the heater recovers and `Fault code`
+  goes back to `0`, so a fault that already cleared by the time you check
+  Home Assistant doesn't just look like it never happened.
+
+If **Auto thermostat** or **Prevent freezing** is on when a fault appears,
+that loop turns itself off rather than keep re-issuing `start thermostat`
+every time it next sees the heater idle -- re-enable it yourself once
+you've dealt with the fault. Manual buttons are unaffected (a fault
+doesn't stop you from pressing Start/Stop).
+
+The fault-code name table is the same partial, lower-confidence one used
+for "Fault (extended, named)" below -- only "no fault" (code 0) was
+actually observed in the reference capture; the rest come from the
+vendor's own string table, unconfirmed against a real fault. An unknown
+code still shows up as `unknown(<code>)` rather than being hidden.
+
+**Getting notified:** Home Assistant doesn't have a dedicated "alarm"
+entity for this (the `alarm_control_panel` domain is for arm/disarm
+security-panel semantics, not a good fit) -- the standard way is a plain
+Automation triggered on **Fault active** turning on, with a notify action.
+For example, in Settings -> Automations -> New automation -> Edit in YAML:
+
+```yaml
+trigger:
+  - platform: state
+    entity_id: binary_sensor.autoterm_heater_fault_active
+    to: "on"
+action:
+  - service: notify.mobile_app_<your_phone>
+    data:
+      title: "Autoterm heater fault"
+      message: >
+        {{ states('sensor.autoterm_heater_fault') }}
+        (code {{ states('sensor.autoterm_heater_fault_code') }})
+```
+
+Swap `notify.mobile_app_<your_phone>` for whichever `notify.*` service you
+have configured (the mobile app integration, Telegram, email, a
+`persistent_notification.create` call, etc. -- any of them work the same
+way, this is just a normal HA automation, nothing add-on-specific).
+
 ## What you get
 
 A single "Autoterm Heater" device in Home Assistant with:
 
 - **Sensors**: State (idle/running/late-run/cooldown/final-shutdown), Fault
-  code, Cabin temperature, Coolant temperature, Elapsed run time
-- **Binary sensors**: Burner active, Telemetry stale (diagnostic -- turns on
-  if no fresh frames have arrived in 5s, e.g. a wiring or port problem)
+  code, Fault (named), Last fault code, Last fault, Last fault time, Cabin
+  temperature, Coolant temperature, Elapsed run time
+- **Binary sensors**: Burner active, Fault active, Telemetry stale
+  (diagnostic -- turns on if no fresh frames have arrived in 5s, e.g. a
+  wiring or port problem)
 - **Climate entity** ("Autoterm thermostat"): mode `off`/`heat` toggles the
   add-on's own software hysteresis loop (stops the heater at target+1°C,
   starts it at target-1°C in thermostat mode); shows current cabin
