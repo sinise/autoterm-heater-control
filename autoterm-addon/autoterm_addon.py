@@ -60,7 +60,13 @@ STATE_TOPIC = f"autoterm/{NODE_ID}/state"
 AVAILABILITY_TOPIC = f"autoterm/{NODE_ID}/availability"
 CMD_PREFIX = f"autoterm/{NODE_ID}/cmd"
 STATE_FILE = "/data/autoterm_state.json"
-STALE_AFTER = 5.0
+# The physical panel's own type=0f (status)/type=11 (cabin temp) query cadence
+# isn't a steady ~2s -- confirmed against a real capture, it regularly takes a
+# ~15-17s detour into other query types (seen as type=06/type=04 exchanges)
+# during which it sends neither, unrelated to this add-on's own debug
+# handshake timing. 5.0 was tighter than that native gap, so "Telemetry
+# stale" was flipping on every such detour even with nothing actually wrong.
+STALE_AFTER = 25.0
 EXT_STALE_AFTER = 5.0
 
 STATE_NAMES = {
@@ -1541,7 +1547,7 @@ class StatusModel:
             snap["fault_active"] = bool(fault_code)
             snap["fault_name"] = (
                 self.profile["faults"].get(fault_code, f"unknown({fault_code})")
-                if fault_code else None
+                if fault_code is not None else None
             )
             if self.last_fault is not None:
                 snap["last_fault_code"] = self.last_fault["code"]

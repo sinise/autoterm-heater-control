@@ -1,5 +1,21 @@
 # Changelog
 
+## 3.1.1
+
+- Fixed **Fault** showing "unknown" at all times instead of "No faults" --
+  fault code 0 (the vendor table's own "No faults" entry) was being treated
+  the same as "no telemetry received yet" and blanked out instead of looked
+  up. Only the display text was wrong; **Fault active** was never affected
+  by this (it already used a plain truthiness check).
+- Fixed **Telemetry stale** (and so **problem** showing continuously,
+  looking like it tracked debug mode) firing on a normal, unrelated pattern
+  in the physical panel's own polling: confirmed against a fresh capture
+  that it regularly goes ~15-17s without sending a status or cabin-temp
+  query at all, while it detours into other query types -- nothing to do
+  with the debug handshake's own ~60s cadence (checked the timing, they
+  don't correlate). `STALE_AFTER` (5s) was tighter than that native gap, so
+  this was firing on ordinary panel behavior; raised to 25s.
+
 ## 3.1.0
 
 - Added **Heater output** (%, extended telemetry only): this add-on's own
