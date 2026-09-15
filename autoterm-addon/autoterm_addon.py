@@ -2727,7 +2727,7 @@ class Bridge:
             log.error(
                 "No MQTT broker configured -- relay/passthrough keeps running, "
                 "but Home Assistant entities need MQTT. Install the Mosquitto "
-                "broker add-on, or set mqtt_host in this add-on's Configuration "
+                "broker app, or set mqtt_host in this app's Configuration "
                 "tab, then restart it."
             )
             return

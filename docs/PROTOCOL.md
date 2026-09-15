@@ -16,7 +16,7 @@ and other units/firmware revisions may differ.
   circuit is required -- a missing ground produced pure garbage on this
   setup before it was fixed.
 - The harness also carries a red +12V power wire alongside the two data
-  wires -- not a signal, don't tap or cut it. See the add-on's `DOCS.md`,
+  wires -- not a signal, don't tap or cut it. See the app's `DOCS.md`,
   "Wiring", for the full physical hookup and why (12V into a UART input
   built for 3.3V/5V logic can damage it).
 
@@ -121,17 +121,17 @@ managing its own stop timing rather than giving the heater a duration.
 
 **Resolved:** the heater has been observed self-stopping (going idle,
 then restarting itself within seconds) roughly every 30-40 minutes under
-this add-on's own Auto thermostat/Prevent freezing, which never send a
+this app's own Auto thermostat/Prevent freezing, which never send a
 duration and never send a `stop` in that window either (confirmed from a
 real overnight capture -- every restart event was `start_thermostat`,
 none was `stop`). This looked like it could be either an internal timeout
 independent of what started it, or something the real panel does that
-this add-on doesn't (e.g. periodically re-affirming the `00 22` marker
-while running). Settled with a Bypass-mode capture (add-on 2.2.0):
-this add-on sent zero commands for over an hour while the heater ran in
+this app doesn't (e.g. periodically re-affirming the `00 22` marker
+while running). Settled with a Bypass-mode capture (app v2.2.0):
+this app sent zero commands for over an hour while the heater ran in
 thermostat mode started directly from the physical display (26°C,
 "unlimited" runtime) -- the identical ~30-40 minute self-stop-then-
-restart still happened. That rules out anything this add-on could ever
+restart still happened. That rules out anything this app could ever
 send: it's the heater/panel's own native behavior, not a protocol
 detail this project is missing or getting wrong.
 
@@ -165,12 +165,12 @@ exactly.
 ## Byte-level corruption on the heater leg (open, unexplained)
 
 Confirmed across two independent real captures (an 8-hour overnight
-capture, and a later ~1-hour Bypass-mode capture -- add-on sending zero
+capture, and a later ~1-hour Bypass-mode capture -- app sending zero
 commands) that the heater->Pi byte stream intermittently garbles for
 roughly 20-260ms at a time, in short bursts happening on average every
 7-8 minutes (63 such bursts counted in the 8-hour capture; a comparable
 elevated rate of stray/unparsed bytes in the 1-hour Bypass capture too).
-**Confirmed not caused by anything this add-on sends**: it happened during
+**Confirmed not caused by anything this app sends**: it happened during
 the Bypass-mode window with zero commands in flight, on both the base
 18-byte `type0f` status frame and the 58-byte extended frame alike, and
 with no timing correlation to the quiet-gap/handshake logic above.
@@ -187,10 +187,10 @@ expected: aa 04 12 00 0f 02 03 00 46 46 00 81 43 00 01 01 5c ff 01 00 00 ...
 observed: 04 aa -- 00 0f 02 03 00 46 46 00 81 43 00 01 01 5c ff 01 00 00 ...
 ```
 
-Confirmed from the add-on's own relay code that stray (unframeable) bytes
+Confirmed from the app's own relay code that stray (unframeable) bytes
 are forwarded to the panel byte-for-byte unmodified -- the filtering
 relay path does `out += ev[1]` for a stray event, same as a real frame.
-So this isn't the add-on's software dropping/eating bytes before they
+So this isn't the app's software dropping/eating bytes before they
 reach the panel: whatever's happening happens upstream of the Pi (on the
 wire, or in the USB-serial adapter/driver), and the panel receives the
 same corrupted bytes too. This is the leading candidate explanation for
@@ -248,25 +248,25 @@ connected -- two distinct failure modes found, one fixed, one narrowed:**
    while the heater side -- including the extended stream itself -- kept
    working fine throughout). The panel's firmware was clearly never built
    to receive an unsolicited 65-byte frame from `dev02` mid-poll-cycle.
-   **Fixed** in the add-on (from v1.1.0): this specific frame is
+   **Fixed** in the app (from v1.1.0): this specific frame is
    filtered out of the heater->panel relay direction, decoded for the
-   add-on's own use but never forwarded to the panel's wire.
+   app's own use but never forwarded to the panel's wire.
 2. **Sending the `PUBR0` handshake itself can also corrupt the panel's
    query/reply exchange**, independent of (1) -- confirmed by
-   reconstructing the add-on's own staleness logic against a real capture
+   reconstructing the app's own staleness logic against a real capture
    and matching it second-for-second to Home Assistant's actual
    stale/OK history, and by finding a real 18-byte heater reply missing 2
    bytes immediately after a handshake send. Happened on roughly half of
    handshake sends, not all -- a timing collision between the handshake
    write and the panel/heater's own in-flight exchange on the shared
    line, not a guaranteed failure. **Narrowed, not proven eliminated**, in
-   the add-on from v1.5.0: the handshake is held until the bus has
+   the app from v1.5.0: the handshake is held until the bus has
    been quiet for 250ms before sending, rather than fired on a blind
    timer. Not re-validated against a fresh long capture the way (1) was --
    treat `PUBR0` as experimental, watch `Telemetry stale` after enabling
    it.
    - The same collision mechanism turned out **not to be specific to
-     `PUBR0`**: every command either add-on injects toward the heater
+     `PUBR0`**: every command either app injects toward the heater
      (Start preheat/thermostat, Stop, Start pump) shares the exact same
      write path and had none of this protection, including the automatic
      stop/start-thermostat calls the Auto thermostat and Prevent freezing
@@ -274,7 +274,7 @@ connected -- two distinct failure modes found, one fixed, one narrowed:**
      interval with no debug mode involved, and can visibly present as the
      panel briefly going "no communication" plus a spurious state
      transition, roughly matching Auto thermostat's own hysteresis
-     interval. **Fixed** in both add-ons from v2.1.0: the same 250ms
+     interval. **Fixed** in both apps from v2.1.0: the same 250ms
      quiet-gap wait now applies to every injected command, not just
      `PUBR0`. As with the handshake fix, this narrows the window rather
      than proving it eliminated.
@@ -392,13 +392,13 @@ The vendor tool ships one `.pfl` profile per heater model (19 total,
 `Profiles/*.pfl`) -- the extended-frame field derivation above was redone
 generically across all of them (same method: read the plaintext formulas
 and state/fault tables, cross-reference `language.res` for labels) and
-baked into the add-on as a selectable "heater profile". **Only
+baked into the app as a selectable "heater profile". **Only
 the Flow 5 / BINAR-5S profile used throughout this document is confirmed
 against real hardware** -- every other model's byte offsets, state names,
 and fault names come straight from the vendor tool's own data with zero
 hardware validation, and it isn't even confirmed the `PUBR0`
 handshake/`dev02`/`type01` mechanism applies to those models at all. See
-the add-on's DOCS.md, "Heater profile: other models", for the full list
+the app's DOCS.md, "Heater profile: other models", for the full list
 and per-model status.
 
 ## New confirmed command: pump-only start
@@ -420,7 +420,7 @@ configurable (e.g. a duration or fan-speed target) or a fixed marker like
 Because this uses the same spoofed-panel identity and the same live
 panel<->heater bus as the already-confirmed Start/Stop commands (not the
 direct-connection diagnostic mode above), it carries the same risk profile
-as those and is reasonable to wire into the add-on the same way.
+as those and is reasonable to wire into the app the same way.
 
 Curiosity, not yet explained: the `.pfl` profile itself labels its own
 "pump start" UI button with the reference `19,30` (its own internal
@@ -449,7 +449,7 @@ open question in case it becomes relevant when profiling other models.
   (`[5]`, `[8]`, `[10]`, `[13]`, `[14]`, `[15]`, `[17]`). The vendor `.pfl`
   profile only defines formulas for the extended frame above, not this one
   -- filling these in needs a fresh real capture of actual panel<->heater
-  traffic (the add-on's own raw traffic capture log, see its DOCS.md),
+  traffic (the app's own raw traffic capture log, see its DOCS.md),
   diffed the same way, ideally with the panel's own display readings noted
   alongside for cross-checking. It's equally possible the panel simply
   isn't sent this data at all (a simple LCD may not need voltage/fan-

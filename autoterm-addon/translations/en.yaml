@@ -37,7 +37,7 @@ configuration:
       manual Stop.
   mqtt_host:
     name: MQTT host (fallback)
-    description: Only used if no MQTT service is discovered automatically (e.g. no Mosquitto add-on installed).
+    description: Only used if no MQTT service is discovered automatically (e.g. no Mosquitto app installed).
   mqtt_port:
     name: MQTT port (fallback)
     description: Only used if no MQTT service is discovered automatically.
@@ -81,5 +81,5 @@ configuration:
       sensor.lacrosse_bedroom_temperature -- find it under Developer Tools
       > States) to use for Auto thermostat/Prevent freezing instead of the
       panel's own cabin-temp report. Requires homeassistant_api access
-      (already granted by this add-on) and polls that entity's state every
+      (already granted by this app) and polls that entity's state every
       15s. Leave blank to keep using the panel's own sensor. See DOCS.md.

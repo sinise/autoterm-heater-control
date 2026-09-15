@@ -10,7 +10,7 @@ real instance via Grafana Explore, not guessed).
 - Home Assistant's [Prometheus integration](https://www.home-assistant.io/integrations/prometheus/)
   enabled, scraped into VictoriaMetrics (e.g. via vmagent or Prometheus
   remote_write).
-- The [Autoterm Heater](../autoterm-addon/) add-on installed and its
+- The [Autoterm Heater](../autoterm-addon/) app installed and its
   entities present in Home Assistant. Several panels (Defined/Measured
   revolutions, Fuel pump frequency, Flame/Liquid/Overheat/Board
   temperature, Fan current) only populate while its Debug mode is on and
@@ -84,7 +84,7 @@ datasource baked in above.
 ## `State`/`Mode of operation`/`Fault (extended, named)` -- why these are numeric-mapped, not `enum`-exported
 
 These three are text-valued (e.g. "idle", "High", "glow plug warming up").
-The first attempt (add-on 1.2.0) declared them as MQTT
+The first attempt (app v1.2.0) declared them as MQTT
 `enum` sensors (`device_class: enum` + an `options` list), on the theory
 that HA's Prometheus integration would export them the same way it already
 exports the climate entity's `mode`/`action` (a separate boolean series per
@@ -102,7 +102,7 @@ but never exports their actual text *value* as a metric at all -- unlike
 climate's `mode`/`action`, which do get a value-carrying metric. Generic
 `sensor`-domain enums just aren't given that treatment.
 
-**The actual fix** (add-on 1.4.0): three new *numeric*
+**The actual fix** (app v1.4.0): three new *numeric*
 sensors -- `State code`, `Mode code` (`state*10 + substate`), and `Fault
 code (extended)` -- that export exactly like the already-working `Fault
 code`/`Engine state`/`Relay state` sensors always did (plain numbers have
@@ -110,5 +110,5 @@ never been the problem, only text was). The three panels above query these
 numeric sensors and do the number-to-name-and-color translation entirely in
 Grafana, via each panel's own `fieldConfig.defaults.mappings` (built from
 the same `STATE_NAMES`/`EXT_MODE_TABLE`/`EXT_FAULT_NAMES` tables the
-add-on itself uses) -- not dependent on HA's Prometheus exporter for that
+app itself uses) -- not dependent on HA's Prometheus exporter for that
 translation at all.

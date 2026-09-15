@@ -1,13 +1,14 @@
 # Autoterm Heater Control
 
-A Home Assistant Supervisor add-on and a Grafana dashboard for an
-**Autoterm-family diesel heater** and its comfort panel, controlled from a
-Raspberry Pi wired inline between the two -- built for a boat installation,
-but the protocol and add-on aren't boat-specific. Confirmed against a real
-**Autoterm 5D / Flow 5** (internally BINAR-5S) unit; the add-on's optional
-Heater profile setting extends extended-telemetry decoding to 19 vendor
-models, only the Flow 5/BINAR-5S family of which is independently
-confirmed -- see its DOCS.md.
+A Home Assistant app (a Supervisor add-on under the hood -- same thing,
+Home Assistant renamed "add-ons" to "apps" in the UI since the 2026.2
+release) and a Grafana dashboard for an **Autoterm-family diesel heater**
+and its comfort panel, controlled from a Raspberry Pi wired inline between
+the two -- built for a boat installation, but the protocol and app aren't
+boat-specific. Confirmed against a real **Autoterm 5D / Flow 5** (internally
+BINAR-5S) unit; the app's optional Heater profile setting extends
+extended-telemetry decoding to 19 vendor models, only the Flow 5/BINAR-5S
+family of which is independently confirmed -- see its DOCS.md.
 
 Status: passive decoding and live command injection (start/stop, preheat,
 thermostat) are **working and verified against real hardware**.
@@ -17,7 +18,7 @@ thermostat) are **working and verified against real hardware**.
 The base protocol (start/stop/preheat/thermostat, status, fault code,
 temperatures) is confirmed against a real **Autoterm 5D / Flow 5**
 (internally `BINAR-5S`) unit and should work unmodified on anything
-sharing that same underlying hardware/firmware. The add-on's **Heater
+sharing that same underlying hardware/firmware. The app's **Heater
 profile** option additionally selects model-specific formulas for the
 *extended telemetry* frame (fan speed, fuel pump frequency, more
 temperatures, named operating mode) across 19 vendor models, extracted
@@ -53,15 +54,15 @@ been validated** against a real unit: byte offsets could be wrong, and
 it isn't even confirmed the extended-telemetry mechanism works the same
 way on that model at all. If you test one of the untested models,
 [open an issue](https://github.com/sinise/autoterm-heater-control/issues)
-with what you found -- see the add-on's `DOCS.md`, "Heater profile: other
+with what you found -- see the app's `DOCS.md`, "Heater profile: other
 models", for the full detail and known limitations.
 
 ## What's in here
 
 | Path | Purpose |
 |---|---|
-| `autoterm-addon/` | The Home Assistant Supervisor add-on -- owns both UART ports directly, publishes status and exposes controls via MQTT discovery, plus optional extended-telemetry probing and a raw traffic capture log. See its `DOCS.md`. |
-| `grafana/` | A Grafana dashboard for the add-on's entities (via Home Assistant's Prometheus integration + VictoriaMetrics). See its `README.md`. |
+| `autoterm-addon/` | The Home Assistant app (Supervisor add-on) -- owns both UART ports directly, publishes status and exposes controls via MQTT discovery, plus optional extended-telemetry probing and a raw traffic capture log. See its `DOCS.md`. |
+| `grafana/` | A Grafana dashboard for the app's entities (via Home Assistant's Prometheus integration + VictoriaMetrics). See its `README.md`. |
 | `docs/PROTOCOL.md` | Full protocol writeup: frame format, CRC, device roles, message catalog, state machine, confirmed commands, open questions. |
 
 ## Hardware
@@ -81,14 +82,14 @@ models", for the full detail and known limitations.
   the same harness -- **leave it alone**. It's not a data signal; feeding
   12V into a UART pin built for 3.3V/5V logic can permanently damage the
   adapter (and possibly the Pi behind it) if that input isn't rated for
-  it. See [the add-on's DOCS.md, "Wiring"](autoterm-addon/DOCS.md#wiring-connecting-the-pi-to-the-heater)
+  it. See [the app's DOCS.md, "Wiring"](autoterm-addon/DOCS.md#wiring-connecting-the-pi-to-the-heater)
   for the full step-by-step and a diagram.
 
 **Confirm which physical port reaches which device before trusting a
 default port assignment.** USB-serial adapters can re-enumerate on replug
 (port names shifting which physical connector they refer to), and getting
 the device roles backwards produces silent no-op, not an error -- the most
-misleading failure mode here. The add-on's `autodiscover_ports` option
+misleading failure mode here. The app's `autodiscover_ports` option
 handles this automatically (see its DOCS.md); otherwise verify by content
 (read a few seconds of traffic on each port and check which one reports a
 heater-shaped rich status frame vs. a simple cabin-temperature reading)
@@ -96,21 +97,25 @@ rather than trusting a port number.
 
 ## Installing
 
-This is a standard Home Assistant Supervisor add-on -- either:
+This is a standard Home Assistant app (a Supervisor add-on -- Home
+Assistant's own developer-facing term for the mechanism is unchanged, only
+the UI/user-facing name is "App" now) -- either:
 
-- **Add this repository**: Settings -> Add-ons -> Add-on Store -> ⋮ menu ->
+- **Add this repository**: Settings -> Apps -> App Store -> ⋮ menu ->
   Repositories -> add `https://github.com/sinise/autoterm-heater-control`,
-  then install "Autoterm Heater" from the store.
+  then install "Autoterm Heater" from the store. (On a Home Assistant
+  version older than 2026.2, this same menu is still labeled Add-ons ->
+  Add-on Store.)
 - **Or copy manually**: copy `autoterm-addon/` into `/addons/` on the
-  Home Assistant host, then install it from the local add-ons list.
+  Home Assistant host, then install it from the local apps list.
 
-See the add-on's `DOCS.md` for wiring, configuration options, and what you
+See the app's `DOCS.md` for wiring, configuration options, and what you
 get once it's running.
 
 ## Safety notes
 
 - This controls a real combustion appliance. The physical panel keeps
-  working normally the entire time the add-on runs (nothing about the
+  working normally the entire time the app runs (nothing about the
   passthrough relay is ever disabled) -- it's always available as a manual
   fallback.
 - The **stop** command is well-confirmed (three independent real captures,
@@ -125,7 +130,7 @@ get once it's running.
   unattended overnight.
 - Debug mode (extended telemetry probing) sends an experimental handshake
   frame toward the heater on the live bus -- off by default; read the
-  add-on's DOCS.md before turning it on.
+  app's DOCS.md before turning it on.
 
 ## Roadmap
 

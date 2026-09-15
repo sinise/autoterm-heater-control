@@ -1,6 +1,15 @@
 # Changelog
 
-## 3.2.2
+## 3.2.3
+
+- Docs/UI text now says "app"/"App Store" instead of "add-on"/"Add-on
+  Store", matching Home Assistant's own 2026.2 rename (Settings -> Apps ->
+  App Store) -- the previous "Add-ons -> Add-on Store" wording in the
+  install instructions no longer matches any menu in a current Home
+  Assistant install. Developer/backend terminology is unchanged, matching
+  Home Assistant's own choice to keep the rename UI/docs-only:
+  `config.yaml`'s manifest format, the `autoterm-addon/` folder name,
+  Supervisor's own API, and internal source comments still say "add-on".
 
 - **Port autodiscovery now saves `/dev/serial/by-id/*` paths instead of
   raw `/dev/ttyUSB<N>`/`/dev/ttyACM<N>` device paths**, when the adapter

@@ -1,4 +1,4 @@
-# Autoterm Heater add-on
+# Autoterm Heater app
 
 Controls an Autoterm-family diesel heater and its comfort panel over UART:
 owns both serial ports directly, publishes live status, and exposes
@@ -18,9 +18,15 @@ Full protocol derivation lives in `docs/PROTOCOL.md` in the
 [main repo](https://github.com/sinise/autoterm-heater-control) -- read it,
 especially "Extended diagnostic-mode telemetry", before enabling debug mode.
 
+*A note on terminology:* this document says "app" throughout, matching
+Home Assistant's own UI since the 2026.2 release (Settings -> Apps ->
+App Store). It's the same thing Home Assistant (and Supervisor's own
+developer-facing API/docs) still calls an "add-on" under the hood -- only
+the name shown to users changed.
+
 ## Before you install
 
-This add-on owns both UART ports directly -- only one process can hold a
+This app owns both UART ports directly -- only one process can hold a
 serial port open, so don't run anything else against the same two ports at
 the same time.
 
@@ -36,7 +42,7 @@ applies once you actually turn debug mode on.
 it's confirmed 5V-tolerant on its inputs -- the panel/heater bus runs 5V
 TTL logic). A single 4-port adapter (e.g. an FTDI/CP2108-based quad
 adapter) works well since it gives you two spare ports beyond the two this
-add-on needs.
+app needs.
 
 **The panel-heater harness has (at least) four wires you care about:**
 
@@ -58,7 +64,7 @@ YELLOW wire -- carries data FROM the heater TO the panel:
 
    HEATER >---[cut]---> HEATER_PORT's RX pin
 
-        (add-on relays it here, in software)
+        (app relays it here, in software)
 
    PANEL_PORT's TX pin >---[cut]---> PANEL / DISPLAY
 
@@ -67,14 +73,14 @@ WHITE wire -- carries data FROM the panel TO the heater:
 
    PANEL / DISPLAY >---[cut]---> PANEL_PORT's RX pin
 
-        (add-on relays it here, in software)
+        (app relays it here, in software)
 
    HEATER_PORT's TX pin >---[cut]---> HEATER
 ```
 
 So: `heater_port` RX = yellow's heater-side stub, `heater_port` TX =
 white's heater-side stub; `panel_port` RX = white's panel-side stub,
-`panel_port` TX = yellow's panel-side stub. The add-on relays bytes
+`panel_port` TX = yellow's panel-side stub. The app relays bytes
 between `panel_port` and `heater_port` in software (see
 `docs/PROTOCOL.md`), so the panel and heater talk exactly as before, just
 through the Pi in the middle.
@@ -84,7 +90,7 @@ adapter.** It's +12V, not a logic-level signal -- feeding 12V into a UART
 RX pin built for 3.3V/5V logic can permanently damage the adapter (and
 possibly the Pi's USB port behind it) if that input isn't rated for it.
 Leave it connected exactly as it already is between the panel and heater;
-this add-on has no reason to touch the power wire at all.
+this app has no reason to touch the power wire at all.
 
 **Ground is not optional.** Tie the Pi's GND (shared between both UART
 ports is fine) to the harness's black/ground wire. A missing shared ground
@@ -111,7 +117,7 @@ stages/etc), instead of just the basic 18-byte status. See
 **The 58-byte extended telemetry frame itself never reaches the physical
 panel.** Confirmed directly on real hardware: the panel visibly gets
 confused if it receives that frame (it's not something its own firmware
-was ever designed to parse). Since 1.1.0, the add-on filters that specific
+was ever designed to parse). Since 1.1.0, the app filters that specific
 frame out of the heater->panel relay direction -- it's still decoded for
 the sensors below, and still logged (marked "NOT forwarded (filtered)") if
 capture logging is on, it just never lands on the panel's wire.
@@ -119,7 +125,7 @@ capture logging is on, it just never lands on the panel's wire.
 **A second, separate issue was found and (partially) fixed in 1.5.0:**
 sending the handshake itself, while it's queued to go out the same
 heater_port line the panel's own query/reply traffic is relayed over, can
-corrupt that traffic -- confirmed by reconstructing this add-on's own
+corrupt that traffic -- confirmed by reconstructing this app's own
 "Telemetry stale" logic against a real capture and matching it
 second-for-second to Home Assistant's actual stale/OK history, and by
 finding a real 18-byte heater reply missing 2 bytes immediately after a
@@ -147,7 +153,7 @@ is itself useful information.
 seeming to restart every 30-40 minutes with debug mode off**, that's not
 this issue -- see the 2.1.0 entry in CHANGELOG.md. The same quiet-gap
 protection above turned out to be missing from every other command this
-add-on injects too (Start preheat/thermostat, Stop, Start pump, including
+app injects too (Start preheat/thermostat, Stop, Start pump, including
 the automatic ones Auto thermostat/Prevent freezing send on their own),
 which is a much more likely cause of periodic disruption with debug mode
 off. Fixed in 2.1.0.
@@ -172,7 +178,7 @@ incomplete (some models expose 5-6 temperature-ish registers; only 4
 slots are wired up here -- see "Known limitation" below), and it isn't
 even confirmed that the extended-telemetry mechanism itself (the `PUBR0`
 handshake, the `dev02`/`type01` frame) works the same way on that model,
-or applies at all. The add-on logs a warning at startup, and a **Heater
+or applies at all. The app logs a warning at startup, and a **Heater
 profile** sensor shows the active selection with a `(NOT TESTED)` suffix,
 for anything but those three.
 
@@ -214,9 +220,9 @@ whole project is built against. Only the *decoding* of the extended
 **Known limitation:** some models expose more temperature-ish registers
 (e.g. separate "in"/"out"/"heat exchanger"/"external sensor" readings)
 than the 4 fixed slots (Flame/Liquid/Overheat/Board temperature) this
-add-on has entities for -- extras beyond the first 4 (prioritized by
+app has entities for -- extras beyond the first 4 (prioritized by
 closest name match to Flow 5's own fields) aren't currently exposed. Their
-formulas are still in the add-on's source if you want to add sensors for
+formulas are still in the app's source if you want to add sensors for
 them.
 
 ## Raw traffic capture log
@@ -227,27 +233,27 @@ frame, and every stray (unparsed) byte -- tagged with who sent it:
 
 - `display` -- the physical comfort panel
 - `heater` -- the heater
-- `rpi` -- this add-on itself (injected commands, and the debug handshake
+- `rpi` -- this app itself (injected commands, and the debug handshake
   if debug mode is on)
 
 Each line has a timestamp, the sender, CRC status, decoded `dev`/`type`/
-`len` where applicable, and the full frame in hex. Since 1.1.0, the add-on's
+`len` where applicable, and the full frame in hex. Since 1.1.0, the app's
 own log messages (info/warning/error -- MQTT status, serial errors,
 commands sent, etc) are also written into this same file, tagged `log`,
 interleaved chronologically with the traffic -- so one file is normally
 everything needed for further analysis. You don't need to separately pull the Supervisor log tab unless
 you're chasing something that happened *before* capture logging was turned
-on, or something the add-on logs at a level below what gets mirrored here.
+on, or something the app logs at a level below what gets mirrored here.
 
 **Where the log goes:** `/config/autoterm_debug/capture_<timestamp>.log` --
 deliberately `/config`, not `/share`, so it shows up right where the
-**File editor** add-on (and most other file-browser add-ons) already opens
+**File editor** app (and most other file-browser apps) already opens
 by default, with no extra navigation or config changes needed. Reachable
-from outside the add-on itself via:
+from outside the app itself via:
 
-- The **File editor** / **Studio Code Server** add-on -- it's right there
+- The **File editor** / **Studio Code Server** app -- it's right there
   in the default file tree, under `autoterm_debug/`.
-- The **Samba share** add-on (if installed and configured to expose
+- The **Samba share** app (if installed and configured to expose
   `config`) -- browse to `\\<home-assistant-ip>\config\autoterm_debug\`
   from your PC.
 - SSH into the Home Assistant host, if you have that set up.
@@ -270,24 +276,24 @@ already-decoded fields the same way the extended-frame work was done.
 
 ## Bypass (disable all injection)
 
-**What it does:** while this switch is on, the add-on stops sending
+**What it does:** while this switch is on, the app stops sending
 *anything* it wouldn't otherwise be asked to by the physical panel --
 Start preheat/thermostat/Stop/Start pump (manual or automatic, including
 Auto thermostat and Prevent freezing) and the debug handshake are all
 suspended (each attempt is logged instead of sent). The real panel keeps
 talking to the real heater exactly as it always does -- this only stops
-the *add-on's own* commands, not the passive relay.
+the *app's own* commands, not the passive relay.
 
 **Why you'd use it:** to capture a clean baseline showing what the heater
 actually does entirely on its own (or driven only by the physical panel),
-with zero chance that anything this add-on injects is a contributing
+with zero chance that anything this app injects is a contributing
 factor. This is exactly how it was used to settle an open question here:
 the heater has been observed self-stopping (going idle, then restarting
 itself within seconds) roughly every 30-40 minutes even under Auto
-thermostat/Prevent freezing. A one-hour Bypass capture -- this add-on
+thermostat/Prevent freezing. A one-hour Bypass capture -- this app
 sending zero commands, heater started and set to 26°C directly from the
 physical display in its own unlimited-runtime thermostat mode -- showed
-the exact same cycle. That rules out this add-on (and any command it
+the exact same cycle. That rules out this app (and any command it
 could ever send) as a cause: it's the heater/panel's own native behavior.
 See docs/PROTOCOL.md for the full writeup.
 
@@ -311,24 +317,24 @@ marker); turning it on again later starts a new one.
 | `preheat_default_minutes` | Initial value of the Preheat duration entity |
 | `auto_target_default` | Initial target for the auto-thermostat climate entity |
 | `prevent_freezing_target_default` | Initial value of the Prevent freezing target entity (0-10°C) -- see below |
-| `mqtt_host`/`mqtt_port`/`mqtt_username`/`mqtt_password` | Only used as a fallback if no MQTT service (e.g. the Mosquitto broker add-on) is auto-discovered |
+| `mqtt_host`/`mqtt_port`/`mqtt_username`/`mqtt_password` | Only used as a fallback if no MQTT service (e.g. the Mosquitto broker app) is auto-discovered |
 | `heater_profile` | Which vendor model's extended-telemetry field formulas to decode with -- see "Heater profile: other models" above |
-| `debug_mode_default` | Whether Debug mode starts on when the add-on (re)starts. Live-togglable from Home Assistant afterward -- this is just the boot default. |
+| `debug_mode_default` | Whether Debug mode starts on when the app (re)starts. Live-togglable from Home Assistant afterward -- this is just the boot default. |
 | `debug_interval_seconds_default` | Initial value of the Debug probe interval number entity. |
-| `capture_log_default` | Whether the capture log starts on when the add-on (re)starts. |
+| `capture_log_default` | Whether the capture log starts on when the app (re)starts. |
 | `capture_log_max_mb` | Size cap per capture file, in MB. |
 | `external_temp_sensor_entity` | Optional entity_id of an existing Home Assistant temperature sensor to use for Auto thermostat/Prevent freezing instead of the panel's own Temperature at display -- see "External temperature sensor" above. Leave blank to keep using the panel sensor. |
 
-If you have the official **Mosquitto broker** add-on (or any add-on
-providing the `mqtt` service) installed, this add-on finds it automatically
+If you have the official **Mosquitto broker** app (or any app
+providing the `mqtt` service) installed, this app finds it automatically
 and the `mqtt_*` options can be left blank.
 
 Debug mode, the probe interval, the capture log toggle, and **Use external
 temperature sensor** are all live-controllable from Home Assistant
-(switches/number entities below) and persisted to the add-on's `/data`
+(switches/number entities below) and persisted to the app's `/data`
 volume -- the `_default` options (and `external_temp_sensor_entity`, which
 has no live equivalent since it's an entity_id, not a toggle) only take
-effect on a fresh install, an add-on restart, or if `/data` is cleared.
+effect on a fresh install, an app restart, or if `/data` is cleared.
 
 ## Port autodiscovery
 
@@ -354,29 +360,29 @@ startup instead of trusting the configured device paths:
 If both are found, each is resolved to its stable `/dev/serial/by-id/*`
 symlink where one exists (tied to that specific adapter's USB vendor/
 product/serial number, not plug-order) before being saved back into this
-add-on's own configuration -- so unlike plugging in some unrelated
+app's own configuration -- so unlike plugging in some unrelated
 USB-serial device and having `/dev/ttyUSB<N>` numbering shift under you
 again, a `by-id` path keeps pointing at the same physical adapter no
 matter what else gets plugged in later. If an adapter has no USB serial
 number for udev to key on (some cheap chipsets don't), there's no `by-id`
-symlink to resolve to -- the add-on logs a warning and saves the raw
+symlink to resolve to -- the app logs a warning and saves the raw
 `/dev/ttyUSB<N>` path instead, same as before, which can still shift.
 Either way, the Configuration tab reflects what was actually found and
 used for that run, and you can turn `autodiscover_ports` back off
 afterward once it's saved a `by-id` path. If either discovery step fails
-(nothing found within the timeout), the add-on logs why and falls back to
+(nothing found within the timeout), the app logs why and falls back to
 whatever `panel_port`/`heater_port` are currently configured -- it never
 refuses to start over a failed discovery.
 
 **Note:** since `autodiscover_ports` is a config option, not a live
-toggle, a saved change only takes effect on the *next* add-on start --
+toggle, a saved change only takes effect on the *next* app start --
 after enabling it from the Configuration tab, click **Save**, then
-explicitly **Start**/**Restart** the add-on (a crashed/stopped add-on
+explicitly **Start**/**Restart** the app (a crashed/stopped app
 won't pick up a config change on its own).
 
 This is a heuristic based on how the wiring has behaved on the reference
 hardware (see `docs/PROTOCOL.md`'s notes on device roles), not a certainty
-for every unit/firmware revision. Watch the add-on log on first use, and
+for every unit/firmware revision. Watch the app log on first use, and
 cross-check with the physical panel that the labeled entities actually
 track what you expect.
 
@@ -416,21 +422,21 @@ happens to be mounted), set the **External temperature sensor entity ID**
 option to that sensor's entity_id (find it under Developer Tools ->
 States, e.g. `sensor.lacrosse_bedroom_temperature`).
 
-There's no live dropdown of Home Assistant entities in this add-on's own
-Configuration page -- Supervisor add-on options are a static schema with no
+There's no live dropdown of Home Assistant entities in this app's own
+Configuration page -- Supervisor app options are a static schema with no
 access to Home Assistant's entity registry, unlike an Integration's config
-flow. Typing the entity_id once is the standard pattern other add-ons use
+flow. Typing the entity_id once is the standard pattern other apps use
 for this same limitation.
 
-**How it works:** this add-on polls that entity's state every 15 seconds
+**How it works:** this app polls that entity's state every 15 seconds
 via Home Assistant's own API (the `homeassistant_api: true` permission this
-add-on requests). While a fresh reading is available, **both** Auto
+app requests). While a fresh reading is available, **both** Auto
 thermostat and Prevent freezing use it instead of Temperature at display -- the
 climate entity's displayed current temperature follows the same source.
 
 **Fallback:** if the entity is left blank, the **Use external temperature
 sensor** switch is off, Home Assistant reports it explicitly `unknown`/
-`unavailable`, or 90 seconds pass without a successful poll, this add-on
+`unavailable`, or 90 seconds pass without a successful poll, this app
 falls back to the panel's own Temperature at display automatically (no action
 needed) -- Prevent freezing in particular is a frost-protection safety net,
 so it's deliberately built to keep working off the panel's own sensor
@@ -443,7 +449,7 @@ currently being used.
 ## Faults
 
 The heater reports a fault code in every status frame (`0` = no fault),
-independent of debug mode. This add-on surfaces it two ways:
+independent of debug mode. This app surfaces it two ways:
 
 - **Fault** / **Fault code**: the *current* fault, named and numeric --
   `Fault` reads "No faults" (or the fault's name) whenever the heater isn't
@@ -492,7 +498,7 @@ action:
 Swap `notify.mobile_app_<your_phone>` for whichever `notify.*` service you
 have configured (the mobile app integration, Telegram, email, a
 `persistent_notification.create` call, etc. -- any of them work the same
-way, this is just a normal HA automation, nothing add-on-specific).
+way, this is just a normal HA automation, nothing app-specific).
 
 ## What you get
 
@@ -507,7 +513,7 @@ A single "Autoterm Heater" device in Home Assistant with:
   25s, e.g. a wiring or port problem), Using external temperature sensor
   (diagnostic -- see "External temperature sensor" above)
 - **Climate entity** ("Autoterm thermostat"): mode `off`/`heat` toggles the
-  add-on's own software hysteresis loop (stops the heater at target+1°C,
+  app's own software hysteresis loop (stops the heater at target+1°C,
   starts it at target-1°C in thermostat mode); shows the temperature
   currently driving control (Temperature at display, or the external sensor if
   active) and burner state as HVAC action
@@ -565,7 +571,7 @@ observed in the reference capture; the rest of the names come from the
 vendor's own string table but haven't been confirmed against a real fault.
 
 **Heater output** is the one exception to "vendor's own formulas" above --
-it's this add-on's own assumption, not vendor data: output scales linearly
+it's this app's own assumption, not vendor data: output scales linearly
 with Fuel pump frequency, with 4.2Hz taken as 100% (so 2.1Hz reads 50%),
 clamped to 0-100%. Unconfirmed against any real spec; treat it as a rough
 indicator, not a calibrated wattage reading.
@@ -573,36 +579,36 @@ indicator, not a calibrated wattage reading.
 ## Troubleshooting
 
 - **No entities appear in Home Assistant**: check MQTT is actually
-  discovered (add-on log should say "Using MQTT service auto-discovery"
+  discovered (app log should say "Using MQTT service auto-discovery"
   rather than the fallback-options warning) and that the MQTT integration is
   set up in Home Assistant (Settings -> Devices & Services).
-- **Entities show unavailable**: the add-on publishes an MQTT "offline" LWT
-  on crash/stop -- check the add-on log for a serial error (wrong port,
+- **Entities show unavailable**: the app publishes an MQTT "offline" LWT
+  on crash/stop -- check the app log for a serial error (wrong port,
   permission, or an unplugged adapter).
 - **Commands have no visible effect**: this exact failure mode has happened
   before in this project from a wrong port/device-byte assumption -- see
   `docs/PROTOCOL.md`'s "Important history" note. Re-verify port assignment
   by content before assuming the command itself is wrong.
 - **Panel briefly shows "no communication"**: narrowed (not proven
-  eliminated) in 2.1.0 -- every command this add-on injects toward the
+  eliminated) in 2.1.0 -- every command this app injects toward the
   heater, including the automatic stop/start-thermostat calls Auto
   thermostat/Prevent freezing make on their own, now waits for a quiet
   moment on the bus first rather than landing mid-exchange with the panel.
   See CHANGELOG.md and `docs/PROTOCOL.md`. A separate, still-unexplained
   source of brief byte-level noise on the heater leg was also found and is
-  independent of anything this add-on sends -- see `docs/PROTOCOL.md`.
+  independent of anything this app sends -- see `docs/PROTOCOL.md`.
 - **The heater seems to restart on its own every 30-40 minutes**: this is
-  **not** a bug in this add-on -- confirmed with a Bypass-mode capture (see
-  above) that the exact same cycle happens with this add-on sending zero
+  **not** a bug in this app -- confirmed with a Bypass-mode capture (see
+  above) that the exact same cycle happens with this app sending zero
   commands, heater started and set purely from the physical display in its
   own unlimited-runtime thermostat mode. It's the heater/panel's own native
   behavior. See `docs/PROTOCOL.md`.
 - **Extended sensors stay blank**: Debug mode is probably off, or the
   handshake isn't getting a reply -- check the **Extended telemetry
-  active** binary sensor and the add-on log for "DEBUG sent PUBR0
+  active** binary sensor and the app log for "DEBUG sent PUBR0
   handshake" lines.
-- **Capture log switch is on but no file appears**: check the add-on log
+- **Capture log switch is on but no file appears**: check the app log
   for a "capture log started" line and the exact path logged, and confirm
   you actually have a way to browse `/config` (File editor/Studio Code
-  Server add-on installed, or SSH). It should appear as `autoterm_debug/`
+  Server app installed, or SSH). It should appear as `autoterm_debug/`
   right in the default file tree -- no extra navigation needed.
