@@ -2168,7 +2168,7 @@
   "timepicker": {},
   "timezone": "",
   "title": "Autoterm Heater",
-  "uid": "autoterm5d-heater",
+  "uid": "autoterm-heater",
   "version": 1,
   "weekStart": ""
 }
