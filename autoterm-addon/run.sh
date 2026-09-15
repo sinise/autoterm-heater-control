@@ -12,6 +12,7 @@ DEBUG_MODE_DEFAULT=$(bashio::config 'debug_mode_default')
 DEBUG_INTERVAL_DEFAULT=$(bashio::config 'debug_interval_seconds_default')
 CAPTURE_LOG_DEFAULT=$(bashio::config 'capture_log_default')
 CAPTURE_LOG_MAX_MB=$(bashio::config 'capture_log_max_mb')
+EXTERNAL_TEMP_SENSOR_ENTITY=$(bashio::config 'external_temp_sensor_entity')
 
 if bashio::config.true 'autodiscover_ports'; then
     bashio::log.info "autodiscover_ports enabled -- probing serial ports for panel/heater"
@@ -72,6 +73,7 @@ export AUTOTERM_DEBUG_INTERVAL_DEFAULT="${DEBUG_INTERVAL_DEFAULT}"
 export AUTOTERM_CAPTURE_LOG_DEFAULT="${CAPTURE_LOG_DEFAULT}"
 export AUTOTERM_CAPTURE_LOG_MAX_MB="${CAPTURE_LOG_MAX_MB}"
 export AUTOTERM_CAPTURE_LOG_DIR="/config/autoterm_debug"
+export AUTOTERM_EXTERNAL_TEMP_SENSOR_ENTITY="${EXTERNAL_TEMP_SENSOR_ENTITY}"
 
 bashio::log.info "Starting Autoterm Heater bridge: panel=${PANEL_PORT} heater=${HEATER_PORT} mqtt=${MQTT_HOST}:${MQTT_PORT} debug_default=${DEBUG_MODE_DEFAULT} capture_default=${CAPTURE_LOG_DEFAULT} heater_profile=${HEATER_PROFILE}"
 

@@ -317,15 +317,18 @@ marker); turning it on again later starts a new one.
 | `debug_interval_seconds_default` | Initial value of the Debug probe interval number entity. |
 | `capture_log_default` | Whether the capture log starts on when the add-on (re)starts. |
 | `capture_log_max_mb` | Size cap per capture file, in MB. |
+| `external_temp_sensor_entity` | Optional entity_id of an existing Home Assistant temperature sensor to use for Auto thermostat/Prevent freezing instead of the panel's own Cabin temperature -- see "External temperature sensor" above. Leave blank to keep using the panel sensor. |
 
 If you have the official **Mosquitto broker** add-on (or any add-on
 providing the `mqtt` service) installed, this add-on finds it automatically
 and the `mqtt_*` options can be left blank.
 
-Debug mode, the probe interval, and the capture log toggle are all
-live-controllable from Home Assistant (switches/number entities below) and
-persisted to the add-on's `/data` volume -- the `_default` options above
-only matter on a fresh install or if `/data` is cleared.
+Debug mode, the probe interval, the capture log toggle, and **Use external
+temperature sensor** are all live-controllable from Home Assistant
+(switches/number entities below) and persisted to the add-on's `/data`
+volume -- the `_default` options (and `external_temp_sensor_entity`, which
+has no live equivalent since it's an entity_id, not a toggle) only take
+effect on a fresh install, an add-on restart, or if `/data` is cleared.
 
 ## Port autodiscovery
 
@@ -387,6 +390,40 @@ seconds once cabin temperature is still at/below the floor. To actually
 stop the heater in that situation, turn off Prevent freezing first (or
 raise its target below the current cabin temperature).
 
+## External temperature sensor
+
+By default, Auto thermostat and Prevent freezing both read the panel's own
+**Cabin temperature** report. If you'd rather they used a different
+temperature sensor already in Home Assistant (e.g. a dedicated sensor
+sitting where you actually feel the temperature, not wherever the panel
+happens to be mounted), set the **External temperature sensor entity ID**
+option to that sensor's entity_id (find it under Developer Tools ->
+States, e.g. `sensor.lacrosse_bedroom_temperature`).
+
+There's no live dropdown of Home Assistant entities in this add-on's own
+Configuration page -- Supervisor add-on options are a static schema with no
+access to Home Assistant's entity registry, unlike an Integration's config
+flow. Typing the entity_id once is the standard pattern other add-ons use
+for this same limitation.
+
+**How it works:** this add-on polls that entity's state every 15 seconds
+via Home Assistant's own API (the `homeassistant_api: true` permission this
+add-on requests). While a fresh reading is available, **both** Auto
+thermostat and Prevent freezing use it instead of Cabin temperature -- the
+climate entity's displayed current temperature follows the same source.
+
+**Fallback:** if the entity is left blank, the **Use external temperature
+sensor** switch is off, Home Assistant reports it explicitly `unknown`/
+`unavailable`, or 90 seconds pass without a successful poll, this add-on
+falls back to the panel's own Cabin temperature automatically (no action
+needed) -- Prevent freezing in particular is a frost-protection safety net,
+so it's deliberately built to keep working off the panel's own sensor
+rather than going blind if the external sensor or Home Assistant's API has
+a problem. **Using external temperature sensor** (binary sensor) shows
+which source is actually driving control right now; **External temperature
+(polled)** shows the raw last-polled value regardless of whether it's
+currently being used.
+
 ## Faults
 
 The heater reports a fault code in every status frame (`0` = no fault),
@@ -447,17 +484,21 @@ A single "Autoterm Heater" device in Home Assistant with:
 
 - **Sensors**: State (idle/running/late-run/cooldown/final-shutdown), Fault
   code, Fault (named), Last fault code, Last fault, Last fault time, Cabin
-  temperature, Coolant temperature, Elapsed run time
+  temperature, External temperature (polled), Coolant temperature, Elapsed
+  run time
 - **Binary sensors**: Burner active, Fault active, Telemetry stale
-  (diagnostic -- turns on if no fresh frames have arrived in 5s, e.g. a
-  wiring or port problem)
+  (diagnostic -- turns on if no fresh status/cabin frames have arrived in
+  25s, e.g. a wiring or port problem), Using external temperature sensor
+  (diagnostic -- see "External temperature sensor" above)
 - **Climate entity** ("Autoterm thermostat"): mode `off`/`heat` toggles the
   add-on's own software hysteresis loop (stops the heater at target+1°C,
-  starts it at target-1°C in thermostat mode); shows current cabin
-  temperature and burner state as HVAC action
+  starts it at target-1°C in thermostat mode); shows the temperature
+  currently driving control (Cabin temperature, or the external sensor if
+  active) and burner state as HVAC action
 - **Number**: Preheat duration (minutes), used by the Start preheat button;
   Prevent freezing target (°C, 0-10)
-- **Switch**: Prevent freezing -- see above
+- **Switch**: Prevent freezing -- see above; Use external temperature
+  sensor -- see "External temperature sensor" above
 - **Buttons**: Start preheat, Start thermostat (manual, one-shot -- distinct
   from the climate entity's automatic loop), Stop, Start pump (ventilation
   only, no combustion -- runs the circulation fan/pump without heat; stop it

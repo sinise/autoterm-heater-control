@@ -74,3 +74,12 @@ configuration:
       even confirmed the extended-telemetry mechanism (PUBR0 handshake,
       dev02/type01 frame) works the same way on that model at all. See
       DOCS.md and docs/PROTOCOL.md before selecting anything else.
+  external_temp_sensor_entity:
+    name: External temperature sensor entity ID
+    description: >-
+      Optional. entity_id of an existing Home Assistant sensor (e.g.
+      sensor.lacrosse_bedroom_temperature -- find it under Developer Tools
+      > States) to use for Auto thermostat/Prevent freezing instead of the
+      panel's own cabin-temp report. Requires homeassistant_api access
+      (already granted by this add-on) and polls that entity's state every
+      15s. Leave blank to keep using the panel's own sensor. See DOCS.md.

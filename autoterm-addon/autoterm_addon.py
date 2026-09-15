@@ -44,6 +44,8 @@ import signal
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime
 
 import paho.mqtt.client as mqtt
@@ -68,6 +70,12 @@ STATE_FILE = "/data/autoterm_state.json"
 # stale" was flipping on every such detour even with nothing actually wrong.
 STALE_AFTER = 25.0
 EXT_STALE_AFTER = 5.0
+EXTERNAL_TEMP_POLL_INTERVAL = 15.0
+# Tolerates a few missed/slow polls of Home Assistant's own API before
+# falling back to the panel's own cabin sensor -- deliberately looser than
+# STALE_AFTER since this is a whole extra hop (HA core, not just the UART
+# bus) with its own transient-failure modes.
+EXTERNAL_TEMP_STALE_AFTER = 90.0
 
 STATE_NAMES = {
     0x00: "idle",
@@ -1373,7 +1381,8 @@ class CaptureLogHandler(logging.Handler):
 
 
 class StatusModel:
-    def __init__(self, preheat_minutes_default, debug_mode_default, debug_interval_default, capture_log_default, profile):
+    def __init__(self, preheat_minutes_default, debug_mode_default, debug_interval_default, capture_log_default,
+                 profile, external_temp_entity=None):
         self.lock = threading.Lock()
         self.profile = profile
         self.status = {}
@@ -1386,12 +1395,17 @@ class StatusModel:
         self.last_command = None
         self.last_fault = None
         self._suppress_reply_until = None
+        self.external_temp_entity = external_temp_entity or None
+        self.external_temp = None
+        self.external_temp_ts = None
+        self.external_temp_raw_state = None
         persisted = load_persisted()
         self.preheat_minutes = persisted.get("preheat_minutes", preheat_minutes_default)
         self.debug_mode = persisted.get("debug_mode", debug_mode_default)
         self.debug_interval = persisted.get("debug_interval", debug_interval_default)
         self.capture_log_wanted = persisted.get("capture_log_enabled", capture_log_default)
         self.bypass_mode = persisted.get("bypass_mode", False)
+        self.external_temp_enabled = persisted.get("external_temp_enabled", True)
 
     def note_frame(self, ts, direction, raw):
         dev = raw[1]
@@ -1436,6 +1450,29 @@ class StatusModel:
     def get_bypass_mode(self):
         with self.lock:
             return self.bypass_mode
+
+    def set_external_temp_enabled(self, enabled):
+        with self.lock:
+            self.external_temp_enabled = bool(enabled)
+        persisted = load_persisted()
+        persisted["external_temp_enabled"] = bool(enabled)
+        save_persisted(persisted)
+
+    def set_external_temp(self, value, raw_state):
+        """Called by ExternalTempPoller after each poll. `value` is a float
+        reading or None; `raw_state` is HA's own state string, used to tell
+        a definite "unavailable"/"unknown" answer (fall back immediately)
+        apart from a failed poll (leave the existing reading in place and
+        let it age out via EXTERNAL_TEMP_STALE_AFTER instead -- a single
+        blip to Home Assistant's own API shouldn't flip the control source)."""
+        with self.lock:
+            self.external_temp_raw_state = raw_state
+            if value is not None:
+                self.external_temp = value
+                self.external_temp_ts = time.time()
+            elif raw_state in ("unknown", "unavailable"):
+                self.external_temp = None
+                self.external_temp_ts = None
 
     def set_preheat_minutes(self, minutes):
         with self.lock:
@@ -1524,9 +1561,25 @@ class StatusModel:
                 status_age is None or cabin_age is None
                 or status_age > STALE_AFTER or cabin_age > STALE_AFTER
             )
+            external_age = None if self.external_temp_ts is None else now - self.external_temp_ts
+            using_external = (
+                bool(self.external_temp_entity) and self.external_temp_enabled
+                and self.external_temp is not None and external_age is not None
+                and external_age <= EXTERNAL_TEMP_STALE_AFTER
+            )
+            effective_temp = self.external_temp if using_external else self.cabin_temp
+            effective_age = external_age if using_external else cabin_age
             snap = {
                 "cabin_temp": self.cabin_temp,
                 "cabin_temp_age": cabin_age,
+                "external_temp_entity": self.external_temp_entity,
+                "external_temp_enabled": self.external_temp_enabled,
+                "external_temp": self.external_temp,
+                "external_temp_age": external_age,
+                "external_temp_raw_state": self.external_temp_raw_state,
+                "external_temp_active": using_external,
+                "effective_temp": effective_temp,
+                "effective_temp_age": effective_age,
                 "status_age": status_age,
                 "stale": stale,
                 "last_command": self.last_command,
@@ -1566,6 +1619,48 @@ class StatusModel:
             snap.update(capture_status)
             snap.update(bypass_log_status)
             return snap
+
+
+class ExternalTempPoller(threading.Thread):
+    """Optional: polls one Home Assistant entity's own state via the
+    Supervisor's Home Assistant API proxy (requires `homeassistant_api:
+    true` in config.yaml, which grants SUPERVISOR_TOKEN access to
+    http://supervisor/core/api) so Auto thermostat/Prevent freezing can use
+    an external temperature sensor instead of the panel's own cabin-temp
+    report. A no-op thread if no entity is configured -- always started
+    the same way DebugSender is, rather than conditionally, to keep
+    Bridge.run() uniform."""
+
+    def __init__(self, model, entity_id, stop_evt):
+        super().__init__(daemon=True, name="external-temp-poller")
+        self.model = model
+        self.entity_id = entity_id
+        self.stop_evt = stop_evt
+        token = os.environ.get("SUPERVISOR_TOKEN", "")
+        self.headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    def run(self):
+        if not self.entity_id:
+            return
+        url = f"http://supervisor/core/api/states/{self.entity_id}"
+        while not self.stop_evt.is_set():
+            try:
+                req = urllib.request.Request(url, headers=self.headers)
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    data = json.loads(resp.read())
+                state = data.get("state")
+                try:
+                    self.model.set_external_temp(float(state), state)
+                except (TypeError, ValueError):
+                    # "unknown"/"unavailable"/anything else non-numeric --
+                    # a definite answer from HA, not a failed poll.
+                    self.model.set_external_temp(None, state)
+            except (urllib.error.URLError, OSError, ValueError) as e:
+                # Couldn't reach HA at all this round -- leave the existing
+                # reading in place; set_external_temp(None, ...) here would
+                # discard a still-good value over one transient hiccup.
+                log.warning("External temp sensor (%s) poll failed: %r", self.entity_id, e)
+            self.stop_evt.wait(EXTERNAL_TEMP_POLL_INTERVAL)
 
 
 class Relay(threading.Thread):
@@ -1891,7 +1986,7 @@ class AutoThermostat(threading.Thread):
             if now - self.last_action_ts < self.MIN_ACTION_INTERVAL:
                 continue
 
-            cabin, age = snap["cabin_temp"], snap["cabin_temp_age"]
+            cabin, age = snap["effective_temp"], snap["effective_temp_age"]
             state = snap.get("state")
             if cabin is None or age is None or age > self.MAX_READING_AGE or state is None:
                 continue
@@ -1996,7 +2091,7 @@ class PreventFreezing(threading.Thread):
             if now - self.last_action_ts < self.MIN_ACTION_INTERVAL:
                 continue
 
-            cabin, age = snap["cabin_temp"], snap["cabin_temp_age"]
+            cabin, age = snap["effective_temp"], snap["effective_temp_age"]
             state = snap.get("state")
             if cabin is None or age is None or age > self.MAX_READING_AGE or state is None:
                 continue
@@ -2104,6 +2199,17 @@ def discovery_configs(profile):
         "device_class": "temperature", "unit_of_measurement": "°C",
         "state_class": "measurement",
     }))
+    entries.append((f"{DISCOVERY_PREFIX}/sensor/{NODE_ID}/external_temp/config", {
+        # Whatever this add-on last polled from external_temp_sensor_entity
+        # (config.yaml) via Home Assistant's own API -- populated only if
+        # that option is set. See "Using external temperature" below for
+        # whether it's actually the one driving Auto thermostat/Prevent
+        # freezing right now.
+        **base, "name": "External temperature (polled)", "unique_id": f"{NODE_ID}_external_temp",
+        "state_topic": STATE_TOPIC, "value_template": blank_to_none("external_temp"),
+        "device_class": "temperature", "unit_of_measurement": "°C",
+        "state_class": "measurement", "entity_category": "diagnostic",
+    }))
     # -- extended-frame temperatures grouped here with the base ones above,
     #    rather than down with the rest of the extended sensors, so every
     #    temperature reading sits together in the entity list. Populated
@@ -2146,6 +2252,22 @@ def discovery_configs(profile):
         "value_template": "{{ 'ON' if value_json.stale else 'OFF' }}",
         "device_class": "problem", "entity_category": "diagnostic",
     }))
+    entries.append((f"{DISCOVERY_PREFIX}/binary_sensor/{NODE_ID}/external_temp_active/config", {
+        # ON only while the polled external sensor is actually the one
+        # feeding Auto thermostat/Prevent freezing -- OFF (falling back to
+        # the panel's own Cabin temperature) whenever it's unconfigured,
+        # switched off, or stale/unavailable for EXTERNAL_TEMP_STALE_AFTER.
+        **base, "name": "Using external temperature sensor", "unique_id": f"{NODE_ID}_external_temp_active",
+        "state_topic": STATE_TOPIC,
+        "value_template": "{{ 'ON' if value_json.external_temp_active else 'OFF' }}",
+        "entity_category": "diagnostic",
+    }))
+    entries.append((f"{DISCOVERY_PREFIX}/switch/{NODE_ID}/external_temp_enabled/config", {
+        **base, "name": "Use external temperature sensor", "unique_id": f"{NODE_ID}_external_temp_enabled",
+        "state_topic": STATE_TOPIC,
+        "value_template": "{{ 'ON' if value_json.external_temp_enabled else 'OFF' }}",
+        "command_topic": f"{CMD_PREFIX}/external_temp_enabled/set", "icon": "mdi:thermometer-lines",
+    }))
 
     entries.append((f"{DISCOVERY_PREFIX}/climate/{NODE_ID}/thermostat/config", {
         **base, "name": "Autoterm thermostat", "unique_id": f"{NODE_ID}_climate",
@@ -2157,7 +2279,7 @@ def discovery_configs(profile):
         "temperature_state_template": blank_to_none("auto_target"),
         "temperature_command_topic": f"{CMD_PREFIX}/auto_target/set",
         "current_temperature_topic": STATE_TOPIC,
-        "current_temperature_template": blank_to_none("cabin_temp"),
+        "current_temperature_template": blank_to_none("effective_temp"),
         "action_topic": STATE_TOPIC,
         "action_template": (
             "{{ 'heating' if value_json.burner_active "
@@ -2390,8 +2512,10 @@ class Bridge:
         self.model = StatusModel(
             cfg["preheat_default"], cfg["debug_mode_default"],
             cfg["debug_interval_default"], cfg["capture_log_default"],
-            self.profile,
+            self.profile, cfg["external_temp_sensor_entity"],
         )
+        self.external_temp_poller = ExternalTempPoller(
+            self.model, cfg["external_temp_sensor_entity"], self.stop_evt)
         self.cmd_queue = queue.Queue()
 
         self.capture_log = CaptureLog(cfg["capture_log_dir"], cfg["capture_log_max_mb"])
@@ -2448,7 +2572,7 @@ class Bridge:
             "start_preheat", "start_thermostat", "stop", "start_pump",
             "prevent_freezing/set", "prevent_freezing_target/set",
             "debug_mode/set", "debug_interval/set", "send_debug_handshake",
-            "capture_log/set", "bypass_mode/set",
+            "capture_log/set", "bypass_mode/set", "external_temp_enabled/set",
         ):
             client.subscribe(f"{CMD_PREFIX}/{suffix}")
         self._publish_state()
@@ -2516,6 +2640,8 @@ class Bridge:
             else:
                 log.info("Bypass mode disabled -- command injection resumed")
                 self.bypass_log.stop()
+        elif suffix == "external_temp_enabled/set":
+            self.model.set_external_temp_enabled(payload.upper() == "ON")
         else:
             log.warning("unhandled command topic %s", topic)
 
@@ -2541,6 +2667,7 @@ class Bridge:
         self.auto.start()
         self.prevent_freezing.start()
         self.debug_sender.start()
+        self.external_temp_poller.start()
         threading.Thread(target=self._command_worker, daemon=True).start()
         threading.Thread(target=self._heartbeat, daemon=True).start()
         threading.Thread(target=self._start_mqtt, daemon=True).start()
@@ -2633,6 +2760,7 @@ def cfg_from_env():
         "capture_log_max_mb": env_int("AUTOTERM_CAPTURE_LOG_MAX_MB", 20),
         "capture_log_dir": os.environ.get("AUTOTERM_CAPTURE_LOG_DIR", "/config/autoterm_debug"),
         "heater_profile": os.environ.get("AUTOTERM_HEATER_PROFILE") or DEFAULT_HEATER_PROFILE,
+        "external_temp_sensor_entity": os.environ.get("AUTOTERM_EXTERNAL_TEMP_SENSOR_ENTITY") or None,
     }
 
 

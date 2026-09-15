@@ -1,5 +1,23 @@
 # Changelog
 
+## 3.2.0
+
+- Added an **External temperature sensor** option: point Auto thermostat
+  and Prevent freezing at any existing Home Assistant temperature sensor's
+  entity_id instead of the panel's own Cabin temperature report. No live
+  entity dropdown -- Supervisor add-on config schemas can't read Home
+  Assistant's entity registry, so it's a plain text entity_id field, polled
+  every 15s via Home Assistant's own API (`homeassistant_api: true`, newly
+  requested by this add-on). Falls back to Cabin temperature automatically
+  if left unconfigured, switched off (new **Use external temperature
+  sensor** switch), or the entity goes stale/unavailable for 90s -- Prevent
+  freezing is a frost-protection safety net and stays working off the
+  panel's own sensor rather than going blind on an external failure. New
+  entities: **External temperature (polled)**, **Using external
+  temperature sensor**, **Use external temperature sensor**. The climate
+  entity's displayed current temperature now follows whichever source is
+  actually driving control. See DOCS.md.
+
 ## 3.1.1
 
 - Fixed **Fault** showing "unknown" at all times instead of "No faults" --

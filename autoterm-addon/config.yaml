@@ -1,5 +1,5 @@
 name: Autoterm Heater
-version: "3.1.1"
+version: "3.2.0"
 slug: autoterm_heater
 description: >-
   Controls an Autoterm-family diesel heater and its comfort panel over
@@ -21,6 +21,7 @@ startup: services
 boot: auto
 uart: true
 hassio_api: true
+homeassistant_api: true
 services:
   - mqtt:want
 map:
@@ -42,6 +43,7 @@ options:
   capture_log_default: false
   capture_log_max_mb: 20
   heater_profile: autoterm_flow_5
+  external_temp_sensor_entity: ""
 schema:
   panel_port: str
   heater_port: str
@@ -59,3 +61,4 @@ schema:
   capture_log_default: bool
   capture_log_max_mb: int(1,500)
   heater_profile: "list(14tc_10_molex|autoterm_air_2d|autoterm_air_4d|autoterm_air_8d|autoterm_air_9d|autoterm_flow_5|binar_5s_next|binar_5s|planar_2_with_flame_sensor|planar_2d|planar_2mk|planar_44d_s_p|planar_44mk|planar_4d_s_p|planar_4d|planar_8d_s_p|planar_9d|sputnik_2|sputnik_3)"
+  external_temp_sensor_entity: str?
