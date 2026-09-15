@@ -10,7 +10,7 @@ real instance via Grafana Explore, not guessed).
 - Home Assistant's [Prometheus integration](https://www.home-assistant.io/integrations/prometheus/)
   enabled, scraped into VictoriaMetrics (e.g. via vmagent or Prometheus
   remote_write).
-- The [Autoterm Heater](../autoterm-addon/) app installed and its
+- The [Autoterm Heater](../autoterm/) app installed and its
   entities present in Home Assistant. Several panels (Defined/Measured
   revolutions, Fuel pump frequency, Flame/Liquid/Overheat/Board
   temperature, Fan current) only populate while its Debug mode is on and

@@ -1,14 +1,12 @@
 # Autoterm Heater Control
 
-A Home Assistant app (a Supervisor add-on under the hood -- same thing,
-Home Assistant renamed "add-ons" to "apps" in the UI since the 2026.2
-release) and a Grafana dashboard for an **Autoterm-family diesel heater**
-and its comfort panel, controlled from a Raspberry Pi wired inline between
+A Home Assistant app
+and its panel, controlled from a Raspberry Pi wired inline between
 the two -- built for a boat installation, but the protocol and app aren't
 boat-specific. Confirmed against a real **Autoterm 5D / Flow 5** (internally
 BINAR-5S) unit; the app's optional Heater profile setting extends
-extended-telemetry decoding to 19 vendor models, only the Flow 5/BINAR-5S
-family of which is independently confirmed -- see its DOCS.md.
+19 vendor models, but only the Flow 5/BINAR-5S
+family which is independently confirmed -- see its DOCS.md.
 
 Status: passive decoding and live command injection (start/stop, preheat,
 thermostat) are **working and verified against real hardware**.
@@ -61,7 +59,7 @@ models", for the full detail and known limitations.
 
 | Path | Purpose |
 |---|---|
-| `autoterm-addon/` | The Home Assistant app (Supervisor add-on) -- owns both UART ports directly, publishes status and exposes controls via MQTT discovery, plus optional extended-telemetry probing and a raw traffic capture log. See its `DOCS.md`. |
+| `autoterm/` | The Home Assistant app (Supervisor add-on) -- owns both UART ports directly, publishes status and exposes controls via MQTT discovery, plus optional extended-telemetry probing and a raw traffic capture log. See its `DOCS.md`. |
 | `grafana/` | A Grafana dashboard for the app's entities (via Home Assistant's Prometheus integration + VictoriaMetrics). See its `README.md`. |
 | `docs/PROTOCOL.md` | Full protocol writeup: frame format, CRC, device roles, message catalog, state machine, confirmed commands, open questions. |
 
@@ -82,7 +80,7 @@ models", for the full detail and known limitations.
   the same harness -- **leave it alone**. It's not a data signal; feeding
   12V into a UART pin built for 3.3V/5V logic can permanently damage the
   adapter (and possibly the Pi behind it) if that input isn't rated for
-  it. See [the app's DOCS.md, "Wiring"](autoterm-addon/DOCS.md#wiring-connecting-the-pi-to-the-heater)
+  it. See [the app's DOCS.md, "Wiring"](autoterm/DOCS.md#wiring-connecting-the-pi-to-the-heater)
   for the full step-by-step and a diagram.
 
 **Confirm which physical port reaches which device before trusting a
@@ -106,7 +104,7 @@ the UI/user-facing name is "App" now) -- either:
   then install "Autoterm Heater" from the store. (On a Home Assistant
   version older than 2026.2, this same menu is still labeled Add-ons ->
   Add-on Store.)
-- **Or copy manually**: copy `autoterm-addon/` into `/addons/` on the
+- **Or copy manually**: copy `autoterm/` into `/addons/` on the
   Home Assistant host, then install it from the local apps list.
 
 See the app's `DOCS.md` for wiring, configuration options, and what you

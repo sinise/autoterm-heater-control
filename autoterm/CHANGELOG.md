@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.2.4
+
+- Renamed the repo folder `autoterm-addon/` -> `autoterm/` (the "-addon"
+  suffix read oddly now that Home Assistant calls these apps -- see
+  3.2.3). **Not** an install-breaking change like the 3.0.0 slug rename:
+  Supervisor identifies an add-on by the `slug` field in `config.yaml`
+  (`autoterm_heater`, unchanged), not by the folder it lives in, so this
+  should reach existing installs as a normal update rather than requiring
+  a fresh reinstall. `repository.yaml` needed no change -- it only holds
+  repo-level metadata (name/url/maintainer), not a list of add-on folders;
+  Supervisor discovers those itself by scanning for `config.yaml` files.
+
 ## 3.2.3
 
 - Docs/UI text now says "app"/"App Store" instead of "add-on"/"Add-on
