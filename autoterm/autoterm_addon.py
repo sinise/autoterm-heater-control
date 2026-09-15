@@ -1167,8 +1167,14 @@ def _discover_panel_port(candidates, baud, timeout):
             framers[path] = Framer()
         except serial.SerialException as e:
             log.warning("discovery: could not open %s: %r", path, e)
+    if listeners:
+        log.info("discovery: opened %s for panel listening, waiting up to %.0fs", sorted(listeners), timeout)
+    else:
+        log.error("discovery: could not open any candidate port at all for panel listening")
+        return None
     try:
         deadline = time.time() + timeout
+        next_heartbeat = time.time() + 2.0
         while time.time() < deadline:
             for path, ser in listeners.items():
                 try:
@@ -1180,6 +1186,10 @@ def _discover_panel_port(candidates, baud, timeout):
                 for ev in framers[path].feed(data):
                     if ev[0] == "frame" and ev[2] and ev[1][1] == 0x03:
                         return path
+            now = time.time()
+            if now >= next_heartbeat:
+                log.info("discovery: still listening for a panel frame (%.0fs left)", deadline - now)
+                next_heartbeat = now + 2.0
         return None
     finally:
         for ser in listeners.values():
@@ -1189,6 +1199,7 @@ def _discover_panel_port(candidates, baud, timeout):
 def _discover_heater_port(candidates, baud):
     poll = build_frame(0x03, 0x0F, b"")
     for path in candidates:
+        log.info("discovery: probing %s for a heater reply (up to %d attempts)", path, HEATER_PROBE_ATTEMPTS)
         try:
             ser = serial.Serial(path, baud, timeout=0.1)
         except serial.SerialException as e:
@@ -1208,6 +1219,7 @@ def _discover_heater_port(candidates, baud):
                             return path
         finally:
             ser.close()
+        log.info("discovery: no heater reply from %s, trying next candidate", path)
     return None
 
 
@@ -1255,6 +1267,46 @@ def discover_ports(baud, panel_timeout=8.0):
 
     log.info("discovery: panel=%s heater=%s", panel_port, heater_port)
     return panel_port, heater_port
+
+
+def verify_current_ports(panel_port, heater_port, baud, panel_timeout=3.0):
+    """Quick check: do the ALREADY CONFIGURED ports still work? Tried before
+    a full scan across every candidate -- cheaper, and avoids a needless
+    re-shuffle when nothing has actually changed. Returns True only if a
+    dev03 (panel) frame is seen on panel_port AND a dev04 (heater) reply is
+    seen on heater_port, each within its own short probe window."""
+    if not panel_port or not heater_port:
+        log.info("discovery: panel_port/heater_port not both set -- skipping the quick check")
+        return False
+    log.info(
+        "discovery: checking whether the configured panel=%s heater=%s still work "
+        "(up to %.0fs) before falling back to a full scan",
+        panel_port, heater_port, panel_timeout,
+    )
+    if _discover_panel_port([panel_port], baud, panel_timeout) != panel_port:
+        log.info("discovery: no dev03 (panel) frame seen on configured panel_port=%s", panel_port)
+        return False
+    if _discover_heater_port([heater_port], baud) != heater_port:
+        log.info("discovery: no dev04 (heater) reply seen on configured heater_port=%s", heater_port)
+        return False
+    log.info("discovery: configured panel=%s heater=%s both still work -- skipping full scan", panel_port, heater_port)
+    return True
+
+
+def discover_or_verify_ports(baud, current_panel=None, current_heater=None, panel_timeout=8.0):
+    """Entry point for `--discover-ports`: verify the currently configured
+    ports first (fast, and the common case -- nothing actually changed),
+    and only fall back to the full multi-candidate scan in discover_ports()
+    if that fails or nothing is configured yet. Either way, the result is
+    resolved to a stable /dev/serial/by-id/* path where possible before
+    being returned, so a verified-but-plain /dev/ttyUSB<N> path (e.g. from
+    an old manual configuration) still gets upgraded."""
+    if verify_current_ports(current_panel, current_heater, baud):
+        panel_port, heater_port = resolve_by_id(current_panel), resolve_by_id(current_heater)
+        log.info("discovery: panel=%s heater=%s", panel_port, heater_port)
+        return panel_port, heater_port
+    log.info("discovery: configured ports not confirmed -- running a full scan of every candidate port")
+    return discover_ports(baud, panel_timeout)
 
 
 def load_persisted():
@@ -2806,7 +2858,9 @@ def cfg_from_env():
 def main():
     if "--discover-ports" in sys.argv:
         baud = int(os.environ.get("AUTOTERM_BAUD", "2400"))
-        found = discover_ports(baud)
+        current_panel = os.environ.get("AUTOTERM_PANEL_PORT") or None
+        current_heater = os.environ.get("AUTOTERM_HEATER_PORT") or None
+        found = discover_or_verify_ports(baud, current_panel, current_heater)
         if found is None:
             return 1
         panel_port, heater_port = found

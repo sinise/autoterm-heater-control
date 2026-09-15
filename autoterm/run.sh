@@ -13,29 +13,37 @@ DEBUG_INTERVAL_DEFAULT=$(bashio::config 'debug_interval_seconds_default')
 CAPTURE_LOG_DEFAULT=$(bashio::config 'capture_log_default')
 CAPTURE_LOG_MAX_MB=$(bashio::config 'capture_log_max_mb')
 EXTERNAL_TEMP_SENSOR_ENTITY=$(bashio::config 'external_temp_sensor_entity')
+AUTODISCOVER_RAW=$(bashio::config 'autodiscover_ports')
 
+# Always state which way this option was actually read, regardless of
+# on/off -- a silent skip here was the whole reason a stale/misconfigured
+# toggle was hard to tell apart from a real discovery failure.
 if bashio::config.true 'autodiscover_ports'; then
-    bashio::log.info "autodiscover_ports enabled -- probing serial ports for panel/heater"
+    bashio::log.info "autodiscover_ports: enabled (raw value '${AUTODISCOVER_RAW}') -- checking configured ports first, then scanning every candidate if needed"
     export AUTOTERM_BAUD="${BAUD}"
+    export AUTOTERM_PANEL_PORT="${PANEL_PORT}"
+    export AUTOTERM_HEATER_PORT="${HEATER_PORT}"
     if DISCOVERY_OUT=$(python3 /app/autoterm_addon.py --discover-ports); then
         DISCOVERED_PANEL=$(echo "${DISCOVERY_OUT}" | grep '^PANEL_PORT=' | cut -d= -f2)
         DISCOVERED_HEATER=$(echo "${DISCOVERY_OUT}" | grep '^HEATER_PORT=' | cut -d= -f2)
         if [ -n "${DISCOVERED_PANEL}" ] && [ -n "${DISCOVERED_HEATER}" ]; then
-            bashio::log.info "Discovered panel=${DISCOVERED_PANEL} heater=${DISCOVERED_HEATER} -- saving to add-on options"
+            bashio::log.info "Using panel=${DISCOVERED_PANEL} heater=${DISCOVERED_HEATER} -- saving to app options"
             PANEL_PORT="${DISCOVERED_PANEL}"
             HEATER_PORT="${DISCOVERED_HEATER}"
             # Best-effort: still use the discovered ports for this run even
             # if the Supervisor can't be updated (e.g. older bashio).
             bashio::addon.option 'panel_port' "${PANEL_PORT}" \
-                || bashio::log.warning "Could not save discovered panel_port to add-on options"
+                || bashio::log.warning "Could not save discovered panel_port to app options"
             bashio::addon.option 'heater_port' "${HEATER_PORT}" \
-                || bashio::log.warning "Could not save discovered heater_port to add-on options"
+                || bashio::log.warning "Could not save discovered heater_port to app options"
         else
             bashio::log.warning "Discovery ran but produced no usable ports -- using configured panel_port/heater_port"
         fi
     else
         bashio::log.warning "Port discovery failed -- using configured panel_port=${PANEL_PORT} heater_port=${HEATER_PORT}"
     fi
+else
+    bashio::log.info "autodiscover_ports: disabled (raw value '${AUTODISCOVER_RAW}') -- using configured panel_port=${PANEL_PORT} heater_port=${HEATER_PORT}"
 fi
 
 # bashio logs its own ERROR line here when no add-on provides the mqtt

@@ -341,9 +341,15 @@ effect on a fresh install, an app restart, or if `/data` is cleared.
 USB-serial adapters can re-enumerate on replug, silently swapping which
 physical connector `/dev/ttyUSB1` vs `/dev/ttyUSB3` refers to -- this has
 bitten this exact project before (see docs/PROTOCOL.md's device-role
-history note). Turning on `autodiscover_ports` runs a probe at every
-startup instead of trusting the configured device paths:
+history note). Turning on `autodiscover_ports` runs a check at every
+startup instead of blindly trusting the configured device paths:
 
+0. **Check the currently configured ports first** -- a few-second check
+   for a dev03 (panel) frame on `panel_port` and a dev04 (heater) reply on
+   `heater_port`. If both still check out (the common case -- nothing
+   plugged in/out since last time), that's it, no full scan needed. Only
+   if that fails (or `panel_port`/`heater_port` are unset) does it move on
+   to a full scan:
 1. **Find the panel** -- listen (read-only) on every `/dev/ttyUSB*` and
    `/dev/ttyACM*` device at once, up to 8 seconds, for a valid frame from
    dev03. The panel appears to report its cabin temperature on its own,
@@ -379,6 +385,15 @@ toggle, a saved change only takes effect on the *next* app start --
 after enabling it from the Configuration tab, click **Save**, then
 explicitly **Start**/**Restart** the app (a crashed/stopped app
 won't pick up a config change on its own).
+
+**Checking it actually took effect:** the very first log line this
+produces, every startup, states which way `autodiscover_ports` was read
+-- either `autodiscover_ports: enabled (raw value '...')` or `disabled
+(raw value '...')`, before anything else runs. If a toggle you saved
+doesn't seem to be doing anything, check that line first: it tells you
+definitively whether the app saw it as on, rather than leaving you
+guessing whether the option didn't save, didn't take effect yet, or
+discovery itself is failing for some other reason.
 
 This is a heuristic based on how the wiring has behaved on the reference
 hardware (see `docs/PROTOCOL.md`'s notes on device roles), not a certainty

@@ -1,5 +1,29 @@
 # Changelog
 
+## 3.2.5
+
+- **`autodiscover_ports` now always logs which way it was read** --
+  `autodiscover_ports: enabled (raw value '...')` or `disabled (raw value
+  '...')`, the very first thing logged at startup. Previously the enabled
+  path logged when it started probing but the disabled path logged
+  nothing at all, so a toggle that silently didn't take effect (not
+  saved, or the app not yet restarted since saving) looked identical in
+  the log to discovery genuinely being off -- impossible to tell apart
+  without this.
+- **When enabled, autodiscovery now checks the already-configured
+  `panel_port`/`heater_port` first** (a few-second listen/probe, same
+  non-actuating query used for the full scan) and only falls back to
+  scanning every `/dev/ttyUSB*`/`/dev/ttyACM*` candidate if that fails or
+  nothing is configured yet -- faster in the common case (nothing
+  actually changed), and the configured ports still get upgraded to a
+  stable `/dev/serial/by-id/*` path on a successful quick check, not just
+  a full scan.
+- Added more progress logging during a full scan: which candidate ports
+  were actually opened for panel listening, a heartbeat every 2s while
+  waiting, and a line per candidate while probing for the heater --
+  previously a scan could go several seconds with no log output at all,
+  indistinguishable from being stuck.
+
 ## 3.2.4
 
 - Renamed the repo folder `autoterm-addon/` -> `autoterm/` (the "-addon"
