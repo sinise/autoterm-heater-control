@@ -351,12 +351,28 @@ startup instead of trusting the configured device paths:
    command**, since those actually move the heater's state machine and must
    never be used just to probe a port.
 
-If both are found, they're saved back into this add-on's own configuration
-(so the Configuration tab reflects reality, and you can turn
-`autodiscover_ports` back off afterward) and used for that run. If either
-step fails (nothing found within the timeout), the add-on logs why and
-falls back to whatever `panel_port`/`heater_port` are currently configured
--- it never refuses to start over a failed discovery.
+If both are found, each is resolved to its stable `/dev/serial/by-id/*`
+symlink where one exists (tied to that specific adapter's USB vendor/
+product/serial number, not plug-order) before being saved back into this
+add-on's own configuration -- so unlike plugging in some unrelated
+USB-serial device and having `/dev/ttyUSB<N>` numbering shift under you
+again, a `by-id` path keeps pointing at the same physical adapter no
+matter what else gets plugged in later. If an adapter has no USB serial
+number for udev to key on (some cheap chipsets don't), there's no `by-id`
+symlink to resolve to -- the add-on logs a warning and saves the raw
+`/dev/ttyUSB<N>` path instead, same as before, which can still shift.
+Either way, the Configuration tab reflects what was actually found and
+used for that run, and you can turn `autodiscover_ports` back off
+afterward once it's saved a `by-id` path. If either discovery step fails
+(nothing found within the timeout), the add-on logs why and falls back to
+whatever `panel_port`/`heater_port` are currently configured -- it never
+refuses to start over a failed discovery.
+
+**Note:** since `autodiscover_ports` is a config option, not a live
+toggle, a saved change only takes effect on the *next* add-on start --
+after enabling it from the Configuration tab, click **Save**, then
+explicitly **Start**/**Restart** the add-on (a crashed/stopped add-on
+won't pick up a config change on its own).
 
 This is a heuristic based on how the wiring has behaved on the reference
 hardware (see `docs/PROTOCOL.md`'s notes on device roles), not a certainty

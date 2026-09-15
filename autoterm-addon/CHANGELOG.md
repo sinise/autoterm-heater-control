@@ -1,6 +1,18 @@
 # Changelog
 
-## 3.2.1
+## 3.2.2
+
+- **Port autodiscovery now saves `/dev/serial/by-id/*` paths instead of
+  raw `/dev/ttyUSB<N>`/`/dev/ttyACM<N>` device paths**, when the adapter
+  has a USB serial number for udev to key one off of. Previously a
+  successful discovery still saved a plain `/dev/ttyUSB<N>` path, which
+  could shift again the next time some unrelated USB-serial device was
+  plugged in or unplugged elsewhere on the same host -- exactly the
+  scenario that prompted this: plugging in an unrelated adapter caused
+  Supervisor's kernel-assigned numbering to reshuffle, and the
+  previously-saved ports started failing to open with an I/O error. Falls
+  back to the raw device path (logged as a warning) if no `by-id` symlink
+  exists for that adapter, same as before.
 
 - Renamed two sensors for a consistent "Temperature ..." naming pattern:
   **Cabin temperature** -> **Temperature at display**, **External

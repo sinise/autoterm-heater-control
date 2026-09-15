@@ -1136,6 +1136,28 @@ def list_candidate_ports():
     return sorted(set(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")))
 
 
+def resolve_by_id(devpath):
+    """Best-effort: map a /dev/ttyUSB*//dev/ttyACM* path to its stable
+    /dev/serial/by-id/* symlink, tied to the adapter's USB vendor/product/
+    serial number rather than plug-order enumeration -- so a saved
+    panel_port/heater_port keeps pointing at the right physical adapter
+    even after some OTHER USB-serial device is plugged in/unplugged and
+    shifts what /dev/ttyUSB<N> everything else gets renumbered to.
+
+    Returns devpath unchanged if no matching by-id symlink is found (a
+    cheap adapter chipset with no USB serial number won't get one -- this
+    is a real gap, not just a missing feature, since without a serial
+    number udev has nothing stable to key on either)."""
+    try:
+        target = os.path.realpath(devpath)
+        for link in glob.glob("/dev/serial/by-id/*"):
+            if os.path.realpath(link) == target:
+                return link
+    except OSError:
+        pass
+    return devpath
+
+
 def _discover_panel_port(candidates, baud, timeout):
     listeners = {}
     framers = {}
@@ -1213,6 +1235,23 @@ def discover_ports(baud, panel_timeout=8.0):
     if heater_port is None:
         log.error("discovery: no dev04 (heater) reply seen on any of %s", remaining)
         return None
+
+    # Resolved to a stable /dev/serial/by-id/* path where possible (falls
+    # back to the raw device path if the adapter has no USB serial number
+    # for udev to key on) -- what actually gets saved back to config.yaml
+    # below, so a future unrelated USB-serial device won't shift these
+    # again the way plain /dev/ttyUSB<N> numbering can.
+    by_id_panel = resolve_by_id(panel_port)
+    by_id_heater = resolve_by_id(heater_port)
+    if by_id_panel == panel_port or by_id_heater == heater_port:
+        log.warning(
+            "discovery: no stable /dev/serial/by-id symlink found for panel=%s and/or "
+            "heater=%s (common for adapters with no USB serial number) -- saving the "
+            "raw device path instead, which can still shift if another USB-serial "
+            "device is plugged in later",
+            panel_port, heater_port,
+        )
+    panel_port, heater_port = by_id_panel, by_id_heater
 
     log.info("discovery: panel=%s heater=%s", panel_port, heater_port)
     return panel_port, heater_port
