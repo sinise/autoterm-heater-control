@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.2.1
+
+- Renamed two sensors for a consistent "Temperature ..." naming pattern:
+  **Cabin temperature** -> **Temperature at display**, **External
+  temperature (polled)** -> **Temperature external sensor**. Display names
+  only -- unique_id/entity_id are unchanged, so existing automations,
+  dashboards, and history keep working under the same
+  `sensor.autoterm_heater_cabin_temp`/`..._external_temp` entity IDs.
+
 ## 3.2.0
 
 - Added an **External temperature sensor** option: point Auto thermostat

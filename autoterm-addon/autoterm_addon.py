@@ -2188,7 +2188,7 @@ def discovery_configs(profile):
         "device_class": "timestamp", "entity_category": "diagnostic",
     }))
     entries.append((f"{DISCOVERY_PREFIX}/sensor/{NODE_ID}/cabin_temp/config", {
-        **base, "name": "Cabin temperature", "unique_id": f"{NODE_ID}_cabin_temp",
+        **base, "name": "Temperature at display", "unique_id": f"{NODE_ID}_cabin_temp",
         "state_topic": STATE_TOPIC, "value_template": blank_to_none("cabin_temp"),
         "device_class": "temperature", "unit_of_measurement": "°C",
         "state_class": "measurement",
@@ -2205,7 +2205,7 @@ def discovery_configs(profile):
         # that option is set. See "Using external temperature" below for
         # whether it's actually the one driving Auto thermostat/Prevent
         # freezing right now.
-        **base, "name": "External temperature (polled)", "unique_id": f"{NODE_ID}_external_temp",
+        **base, "name": "Temperature external sensor", "unique_id": f"{NODE_ID}_external_temp",
         "state_topic": STATE_TOPIC, "value_template": blank_to_none("external_temp"),
         "device_class": "temperature", "unit_of_measurement": "°C",
         "state_class": "measurement", "entity_category": "diagnostic",
