@@ -1144,7 +1144,7 @@ def list_candidate_ports():
     return sorted(set(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")))
 
 
-def resolve_by_id(devpath):
+def resolve_by_id(devpath, baud=None):
     """Best-effort: map a /dev/ttyUSB*//dev/ttyACM* path to its stable
     /dev/serial/by-id/* symlink, tied to the adapter's USB vendor/product/
     serial number rather than plug-order enumeration -- so a saved
@@ -1155,12 +1155,32 @@ def resolve_by_id(devpath):
     Returns devpath unchanged if no matching by-id symlink is found (a
     cheap adapter chipset with no USB serial number won't get one -- this
     is a real gap, not just a missing feature, since without a serial
-    number udev has nothing stable to key on either)."""
+    number udev has nothing stable to key on either).
+
+    If `baud` is given, also verifies the candidate by-id path is actually
+    openable (briefly opens and closes it) before trusting it -- confirmed
+    on real hardware that a by-id symlink can exist and resolve correctly
+    via readlink() while still failing to open (SerialException, not
+    caught by the realpath check alone): a stale symlink after the
+    adapter re-enumerated, or a container/cgroup device-permission
+    mismatch, both look identical to a working one until actually opened.
+    Falls back to devpath if the by-id candidate isn't openable."""
     try:
         target = os.path.realpath(devpath)
         for link in glob.glob("/dev/serial/by-id/*"):
-            if os.path.realpath(link) == target:
-                return link
+            if os.path.realpath(link) != target:
+                continue
+            if baud is not None:
+                try:
+                    serial.Serial(link, baud, timeout=0.1).close()
+                except serial.SerialException as e:
+                    log.warning(
+                        "discovery: found by-id symlink %s for %s but it isn't actually "
+                        "openable (%r) -- using the raw device path instead",
+                        link, devpath, e,
+                    )
+                    return devpath
+            return link
     except OSError:
         pass
     return devpath
@@ -1261,8 +1281,8 @@ def discover_ports(baud, panel_timeout=8.0):
     # for udev to key on) -- what actually gets saved back to config.yaml
     # below, so a future unrelated USB-serial device won't shift these
     # again the way plain /dev/ttyUSB<N> numbering can.
-    by_id_panel = resolve_by_id(panel_port)
-    by_id_heater = resolve_by_id(heater_port)
+    by_id_panel = resolve_by_id(panel_port, baud)
+    by_id_heater = resolve_by_id(heater_port, baud)
     if by_id_panel == panel_port or by_id_heater == heater_port:
         log.warning(
             "discovery: no stable /dev/serial/by-id symlink found for panel=%s and/or "
@@ -1310,7 +1330,7 @@ def discover_or_verify_ports(baud, current_panel=None, current_heater=None, pane
     being returned, so a verified-but-plain /dev/ttyUSB<N> path (e.g. from
     an old manual configuration) still gets upgraded."""
     if verify_current_ports(current_panel, current_heater, baud):
-        panel_port, heater_port = resolve_by_id(current_panel), resolve_by_id(current_heater)
+        panel_port, heater_port = resolve_by_id(current_panel, baud), resolve_by_id(current_heater, baud)
         log.info("discovery: panel=%s heater=%s", panel_port, heater_port)
         return panel_port, heater_port
     log.info("discovery: configured ports not confirmed -- running a full scan of every candidate port")
@@ -3039,7 +3059,17 @@ def main():
     try:
         bridge = Bridge(cfg)
     except serial.SerialException as e:
-        log.error("could not open serial ports: %r", e)
+        hint = ""
+        if any("/dev/serial/by-id/" in (cfg.get(k) or "") for k in ("panel_port", "heater_port")):
+            hint = (
+                " -- panel_port/heater_port is a /dev/serial/by-id/* path that isn't "
+                "opening right now (stale after the adapter re-enumerated, or a "
+                "container device-permission mismatch); try unplugging/replugging the "
+                "USB-serial adapter, then restarting Home Assistant itself (not just "
+                "this app) so Supervisor re-grants device access, or turn on "
+                "autodiscover_ports to have it re-resolved automatically on next start"
+            )
+        log.error("could not open serial ports: %r%s", e, hint)
         return 1
 
     def handle_signal(signum, frame):

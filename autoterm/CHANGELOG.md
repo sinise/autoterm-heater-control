@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.4.2
+
+- **Fixed a real gap in the 3.2.2 by-id resolution**: `resolve_by_id()`
+  only checked that a `/dev/serial/by-id/*` symlink existed and resolved
+  to the right target via `readlink()` -- it never actually tried to open
+  it. Confirmed on real hardware: a by-id symlink can exist and resolve
+  correctly while still failing to open with a `SerialException` (a stale
+  symlink after the adapter re-enumerated, or a container/cgroup
+  device-permission mismatch), which looked identical to a working one
+  and got saved to `panel_port`/`heater_port` anyway -- reproduced as a
+  crash loop, "could not open serial ports" on every restart. Now briefly
+  opens and closes the candidate before trusting/saving it, falling back
+  to the plain device path if it isn't actually openable.
+- The startup error when serial ports fail to open now adds a specific
+  hint when the configured path is a `/dev/serial/by-id/*` one that isn't
+  opening: try replugging the adapter and restarting Home Assistant
+  itself (not just this app), or turn on `autodiscover_ports` to have it
+  re-resolved on the next start.
+
 ## 3.4.1
 
 - **Turning Auto thermostat on no longer sends `start thermostat` if the
