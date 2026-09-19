@@ -498,9 +498,12 @@ freezing note** sensors show which stage of the backoff each loop is
 currently in (e.g. "waiting 15min before retry 2/3"), or the fault it
 gave up on once the schedule is exhausted. Manual buttons are unaffected (a
 fault doesn't stop you from pressing Start/Stop), and turning Auto
-thermostat on/off from Home Assistant always sends `start thermostat`/
-`stop` immediately, regardless of a fault or the backoff state -- a direct
-request overrides the schedule rather than queuing behind it.
+thermostat on from Home Assistant sends `start thermostat` immediately
+(regardless of a fault or the backoff state -- a direct request overrides
+the schedule rather than queuing behind it), **unless the cabin is
+already at or above target**, in which case there's nothing to do and it
+doesn't bother. Turning it off always sends `stop` immediately, no
+exceptions.
 
 The fault-code name table is the same partial, lower-confidence one used
 for "Fault (extended, named)" below -- only "no fault" (code 0) was
@@ -549,10 +552,12 @@ A single "Autoterm Heater" device in Home Assistant with:
   (diagnostic -- see "External temperature sensor" above)
 - **Climate entity** ("Autoterm thermostat"): mode `off`/`heat` toggles the
   app's own software hysteresis loop (stops the heater at target+1°C,
-  starts it at target-1°C in thermostat mode, and immediately sends
-  start/stop the moment the mode is changed -- see "Faults" above); shows
-  the temperature currently driving control (Temperature at display, or
-  the external sensor if active) and burner state as HVAC action
+  starts it at target-1°C in thermostat mode); switching to `heat`
+  immediately sends start thermostat unless the cabin's already at/above
+  target, switching to `off` always immediately sends stop -- see "Faults"
+  above; shows the temperature currently driving control (Temperature at
+  display, or the external sensor if active) and burner state as HVAC
+  action
 - **Number**: Preheat duration (minutes), used by the Start preheat button;
   Prevent freezing target (°C, 0-10)
 - **Switch**: Prevent freezing -- see above; Use external temperature

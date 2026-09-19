@@ -2107,15 +2107,25 @@ class AutoThermostat(threading.Thread):
         if became_enabled is None or became_enabled == was_enabled:
             return
         # Turning Auto thermostat on/off is a direct request from Home
-        # Assistant -- act on it immediately (regardless of fault/cabin
-        # temp) instead of waiting for the next poll cycle's hysteresis
-        # check, which might not want to act at all right now.
+        # Assistant -- act on it immediately (regardless of fault) instead
+        # of waiting for the next poll cycle's hysteresis check, which
+        # might not want to act at all right now. The one exception: don't
+        # start if the cabin is already at/above target -- there's nothing
+        # to do, and starting anyway would just get stopped again on the
+        # next poll once the loop notices, for no benefit.
         now = time.time()
         try:
             if became_enabled:
-                note = "Auto thermostat enabled -> sending start thermostat"
-                log.info("AUTO %s", note)
-                self.commander.start_thermostat()
+                snap = self.model.snapshot()
+                cabin, age = snap.get("effective_temp"), snap.get("effective_temp_age")
+                cabin_known = cabin is not None and age is not None and age <= self.MAX_READING_AGE
+                if cabin_known and cabin >= self.target:
+                    note = f"Auto thermostat enabled -> cabin {cabin} already >= target {self.target}, not starting"
+                    log.info("AUTO %s", note)
+                else:
+                    note = "Auto thermostat enabled -> sending start thermostat"
+                    log.info("AUTO %s", note)
+                    self.commander.start_thermostat()
                 self.fault_retry_count = 0
                 self.next_fault_retry_ts = None
                 self._fault_exhausted_logged = False

@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.4.1
+
+- **Turning Auto thermostat on no longer sends `start thermostat` if the
+  cabin is already at or above target** -- 3.4.0 sent it unconditionally.
+  There's nothing to do in that case, and starting anyway would just get
+  stopped again on the next poll once the hysteresis loop notices, for no
+  benefit. Falls back to sending it (the 3.4.0 behavior) if the cabin
+  temperature isn't known or is stale -- unclear beats presumed-fine here.
+  Turning it off still always sends `stop`, unconditionally.
+
 ## 3.4.0
 
 - **Auto thermostat and Prevent freezing no longer disable themselves on
