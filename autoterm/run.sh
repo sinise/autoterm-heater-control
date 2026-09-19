@@ -11,7 +11,7 @@ HEATER_PROFILE=$(bashio::config 'heater_profile')
 DEBUG_MODE_DEFAULT=$(bashio::config 'debug_mode_default')
 DEBUG_INTERVAL_DEFAULT=$(bashio::config 'debug_interval_seconds_default')
 CAPTURE_LOG_DEFAULT=$(bashio::config 'capture_log_default')
-CAPTURE_LOG_MAX_MB=$(bashio::config 'capture_log_max_mb')
+CAPTURE_LOG_RETENTION_HOURS=$(bashio::config 'capture_log_retention_hours')
 EXTERNAL_TEMP_SENSOR_ENTITY=$(bashio::config 'external_temp_sensor_entity')
 AUTODISCOVER_RAW=$(bashio::config 'autodiscover_ports')
 
@@ -79,7 +79,7 @@ export AUTOTERM_MQTT_PASSWORD="${MQTT_PASS}"
 export AUTOTERM_DEBUG_MODE_DEFAULT="${DEBUG_MODE_DEFAULT}"
 export AUTOTERM_DEBUG_INTERVAL_DEFAULT="${DEBUG_INTERVAL_DEFAULT}"
 export AUTOTERM_CAPTURE_LOG_DEFAULT="${CAPTURE_LOG_DEFAULT}"
-export AUTOTERM_CAPTURE_LOG_MAX_MB="${CAPTURE_LOG_MAX_MB}"
+export AUTOTERM_CAPTURE_LOG_RETENTION_HOURS="${CAPTURE_LOG_RETENTION_HOURS}"
 export AUTOTERM_CAPTURE_LOG_DIR="/config/autoterm_debug"
 export AUTOTERM_EXTERNAL_TEMP_SENSOR_ENTITY="${EXTERNAL_TEMP_SENSOR_ENTITY}"
 

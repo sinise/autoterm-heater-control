@@ -60,9 +60,12 @@ configuration:
   capture_log_default:
     name: Capture log default
     description: Whether the raw traffic capture log starts on on startup.
-  capture_log_max_mb:
-    name: Capture log size cap (MB)
-    description: Per-file size cap for the raw traffic capture log under /config/autoterm_debug.
+  capture_log_retention_hours:
+    name: Capture log retention (hours)
+    description: >-
+      How long the raw traffic capture log under /config/autoterm_debug
+      keeps rolling before old files are pruned -- it never stops writing
+      regardless of size, unlike a fixed byte cap.
   heater_profile:
     name: Heater profile (extended telemetry)
     description: >-

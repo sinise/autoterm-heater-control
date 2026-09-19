@@ -46,7 +46,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import paho.mqtt.client as mqtt
 import serial
@@ -1332,35 +1332,38 @@ def save_persisted(data):
 # a web server of its own.
 # --------------------------------------------------------------------------
 
+ROTATE_INTERVAL_S = 3600.0  # new file every hour while a capture log runs
+
+
 class CaptureLog:
-    def __init__(self, directory, max_mb, name_prefix="capture"):
+    """A rolling capture: keeps writing regardless of size, never just
+    stops. Implemented as a chain of hourly files (rotated on elapsed time,
+    not a size cap) rather than one ever-growing file, so retention is
+    simply deleting whole files once they're older than retention_hours --
+    no need to rewrite/truncate a live file to drop old lines from it."""
+
+    def __init__(self, directory, retention_hours=24.0, name_prefix="capture"):
         self.directory = directory
-        self.max_bytes = max_mb * 1024 * 1024
+        self.retention_hours = retention_hours
         self.name_prefix = name_prefix
-        # Reentrant: note() is called from a logging.Handler, and a couple
-        # of code paths (e.g. the size-cap warning in _write()) log from
-        # inside an already-held lock -- a plain Lock would deadlock there.
+        # Reentrant: note() is called from a logging.Handler, and _rotate()
+        # logs from inside an already-held lock -- a plain Lock would
+        # deadlock there.
         self.lock = threading.RLock()
         self.fh = None
         self.path = None
         self.bytes_written = 0
         self.enabled = False
-        self.capped = False
+        self.file_opened_at = None
 
     def start(self):
         with self.lock:
             if self.fh is not None:
                 return
             os.makedirs(self.directory, exist_ok=True)
-            name = f"{self.name_prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-            self.path = os.path.join(self.directory, name)
-            self.fh = open(self.path, "a", buffering=1)
-            self.bytes_written = 0
-            self.capped = False
             self.enabled = True
-            self.fh.write(f"# === autoterm debug capture start {datetime.now().isoformat()} ===\n")
-            self.fh.write("# columns: time  sender  status  dev  type  len  full-frame-hex\n")
-        log.info("capture log started: %s", self.path)
+            self._open_new_file()
+        log.info("capture log started: %s (rolling %.0fh retention)", self.path, self.retention_hours)
 
     def stop(self):
         with self.lock:
@@ -1373,7 +1376,7 @@ class CaptureLog:
 
     def frame(self, ts, sender, raw, crc_ok, note=""):
         with self.lock:
-            if not self.enabled or self.fh is None or self.capped:
+            if not self.enabled or self.fh is None:
                 return
             dev = raw[1] if len(raw) > 1 else 0
             type_ = raw[4] if len(raw) > 4 else 0
@@ -1386,13 +1389,13 @@ class CaptureLog:
 
     def stray(self, ts, sender, data):
         with self.lock:
-            if not self.enabled or self.fh is None or self.capped:
+            if not self.enabled or self.fh is None:
                 return
             self._write(f"{_iso(ts)}  {sender:<11s}  STRAY {len(data)}B  {data.hex(' ')}\n")
 
     def raw_send(self, ts, sender, raw, note=""):
         with self.lock:
-            if not self.enabled or self.fh is None or self.capped:
+            if not self.enabled or self.fh is None:
                 return
             suffix = f"  # {note}" if note else ""
             self._write(f"{_iso(ts)}  {sender:<11s}  SENT      {raw.hex(' ')}{suffix}\n")
@@ -1402,19 +1405,52 @@ class CaptureLog:
         chronologically with the traffic -- so one file has both what was
         on the wire and what the add-on itself was doing/seeing."""
         with self.lock:
-            if not self.enabled or self.fh is None or self.capped:
+            if not self.enabled or self.fh is None:
                 return
             self._write(f"{_iso(ts)}  {'log':<11s}  {level:<9s}{msg}\n")
 
     def _write(self, line):
         # caller holds self.lock
+        if time.time() - self.file_opened_at >= ROTATE_INTERVAL_S:
+            self._open_new_file()
         self.fh.write(line)
         self.bytes_written += len(line)
-        if self.bytes_written > self.max_bytes and not self.capped:
-            self.capped = True
-            self.fh.write(f"# === capture stopped: reached the {self.max_bytes // (1024*1024)}MB cap ===\n")
-            log.warning("capture log %s reached its size cap -- no longer writing "
-                        "(toggle it off and back on to start a fresh file)", self.path)
+
+    def _open_new_file(self):
+        # caller holds self.lock
+        if self.fh is not None:
+            self.fh.write(f"# === capture end (rotating to a new file) {datetime.now().isoformat()} ===\n")
+            self.fh.close()
+        name = f"{self.name_prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        self.path = os.path.join(self.directory, name)
+        self.fh = open(self.path, "a", buffering=1)
+        self.bytes_written = 0
+        self.file_opened_at = time.time()
+        self.fh.write(f"# === autoterm debug capture start {datetime.now().isoformat()} ===\n")
+        self.fh.write("# columns: time  sender  status  dev  type  len  full-frame-hex\n")
+        self._prune_old_files()
+
+    def _prune_old_files(self):
+        # caller holds self.lock. Deletes this log's own past files (same
+        # name_prefix -- never touches the other CaptureLog instance's
+        # files) once their filename timestamp is older than
+        # retention_hours, keyed on the name rather than mtime so a
+        # restored backup/clock change can't wedge pruning.
+        cutoff = datetime.now() - timedelta(hours=self.retention_hours)
+        for fpath in glob.glob(os.path.join(self.directory, f"{self.name_prefix}_*.log")):
+            if fpath == self.path:
+                continue
+            stem = os.path.basename(fpath)[len(self.name_prefix) + 1: -len(".log")]
+            try:
+                file_ts = datetime.strptime(stem, "%Y%m%d_%H%M%S")
+            except ValueError:
+                continue
+            if file_ts < cutoff:
+                try:
+                    os.remove(fpath)
+                    log.info("capture log: pruned %s (past the %.0fh retention window)", fpath, self.retention_hours)
+                except OSError as e:
+                    log.warning("capture log: could not prune %s: %r", fpath, e)
 
     def status(self, prefix="capture_log"):
         with self.lock:
@@ -2609,13 +2645,14 @@ class Bridge:
             self.model, cfg["external_temp_sensor_entity"], self.stop_evt)
         self.cmd_queue = queue.Queue()
 
-        self.capture_log = CaptureLog(cfg["capture_log_dir"], cfg["capture_log_max_mb"])
+        self.capture_log = CaptureLog(cfg["capture_log_dir"], cfg["capture_log_retention_hours"])
         if self.model.get_capture_log_wanted():
             self.capture_log.start()
         # Separate log, separate file, started/stopped only by the Bypass
         # switch -- so a bypass test run's traffic is captured cleanly even
         # if the normal capture log is off (or vice versa).
-        self.bypass_log = CaptureLog(cfg["capture_log_dir"], cfg["capture_log_max_mb"], name_prefix="bypass")
+        self.bypass_log = CaptureLog(
+            cfg["capture_log_dir"], cfg["capture_log_retention_hours"], name_prefix="bypass")
         if self.model.get_bypass_mode():
             self.bypass_log.start()
         self._wire_log = CaptureLogFanout([self.capture_log, self.bypass_log])
@@ -2848,7 +2885,7 @@ def cfg_from_env():
         "debug_mode_default": env_bool("AUTOTERM_DEBUG_MODE_DEFAULT", False),
         "debug_interval_default": env_int("AUTOTERM_DEBUG_INTERVAL_DEFAULT", 60),
         "capture_log_default": env_bool("AUTOTERM_CAPTURE_LOG_DEFAULT", False),
-        "capture_log_max_mb": env_int("AUTOTERM_CAPTURE_LOG_MAX_MB", 20),
+        "capture_log_retention_hours": env_float("AUTOTERM_CAPTURE_LOG_RETENTION_HOURS", 24.0),
         "capture_log_dir": os.environ.get("AUTOTERM_CAPTURE_LOG_DIR", "/config/autoterm_debug"),
         "heater_profile": os.environ.get("AUTOTERM_HEATER_PROFILE") or DEFAULT_HEATER_PROFILE,
         "external_temp_sensor_entity": os.environ.get("AUTOTERM_EXTERNAL_TEMP_SENSOR_ENTITY") or None,

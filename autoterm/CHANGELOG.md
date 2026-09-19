@@ -1,5 +1,20 @@
 # Changelog
 
+## 3.3.0
+
+- **The raw traffic capture log is now a rolling log, not a hard size
+  cap.** Previously it stopped writing entirely once it hit
+  `capture_log_max_mb` (default 20MB) until manually toggled off and back
+  on -- silently going dark mid-incident was exactly the failure mode a
+  capture log exists to avoid. It's now a chain of hourly files, rotated
+  automatically, that keeps writing regardless of size; files older than
+  the new **`capture_log_retention_hours`** option (default 24h) are
+  deleted automatically on the next rotation. Applies to both the normal
+  capture log and the Bypass log (they're the same mechanism).
+  **Replaces** the `capture_log_max_mb` option -- if you'd customized it,
+  that value is gone and `capture_log_retention_hours` reverts to its
+  24h default; re-set it if you want something else.
+
 ## 3.2.5
 
 - **`autodiscover_ports` now always logs which way it was read** --

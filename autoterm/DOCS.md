@@ -260,10 +260,18 @@ from outside the app itself via:
 
 Toggling the switch off closes the current file cleanly (with an end
 marker) -- toggling it back on starts a **new** file rather than appending,
-so each capture session is its own file. A capture is capped at
-`capture_log_max_mb` (default 20MB, configurable) -- past that it stops
-writing (logged as a warning) rather than filling up storage; toggle it off
-and on again to start a fresh file if you hit the cap mid-session.
+so each capture session is its own file.
+
+**Rolling retention, not a size cap:** while running, the log keeps
+writing regardless of how big it gets -- it never just stops. Internally
+it's a chain of hourly files (`capture_<timestamp>.log`, rotated
+automatically every hour), and once a file's timestamp is older than
+`capture_log_retention_hours` (default 24h, configurable) it's deleted
+automatically on the next rotation. So at steady state you'll see roughly
+the last `capture_log_retention_hours` worth of hourly files sitting in
+`autoterm_debug/` -- that's expected, not a leak -- and the combined set
+always covers a rolling window of that length, however much traffic
+passed through in it.
 
 The **Capture log file** and **Capture log size** sensors show the current
 file name and size without needing to go find it first.
@@ -298,8 +306,9 @@ could ever send) as a cause: it's the heater/panel's own native behavior.
 See docs/PROTOCOL.md for the full writeup.
 
 **Logging:** turning Bypass on starts a separate log file,
-`/config/autoterm_debug/bypass_<timestamp>.log` -- same format as the
-normal capture log, but its own file and its own on/off state, so a
+`/config/autoterm_debug/bypass_<timestamp>.log` -- same rolling format
+(hourly rotation, pruned after `capture_log_retention_hours`) as the
+normal capture log, but its own file chain and its own on/off state, so a
 bypass test is captured cleanly regardless of whether the regular
 **Capture raw traffic log** switch happens to be on or off. The **Bypass
 log file** and **Bypass log size** sensors show the current file without
@@ -322,7 +331,7 @@ marker); turning it on again later starts a new one.
 | `debug_mode_default` | Whether Debug mode starts on when the app (re)starts. Live-togglable from Home Assistant afterward -- this is just the boot default. |
 | `debug_interval_seconds_default` | Initial value of the Debug probe interval number entity. |
 | `capture_log_default` | Whether the capture log starts on when the app (re)starts. |
-| `capture_log_max_mb` | Size cap per capture file, in MB. |
+| `capture_log_retention_hours` | How long the rolling capture log keeps files before pruning them, in hours -- see "Raw traffic capture log" above. |
 | `external_temp_sensor_entity` | Optional entity_id of an existing Home Assistant temperature sensor to use for Auto thermostat/Prevent freezing instead of the panel's own Temperature at display -- see "External temperature sensor" above. Leave blank to keep using the panel sensor. |
 
 If you have the official **Mosquitto broker** app (or any app
