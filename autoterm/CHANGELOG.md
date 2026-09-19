@@ -1,5 +1,29 @@
 # Changelog
 
+## 3.4.0
+
+- **Auto thermostat and Prevent freezing no longer disable themselves on
+  a heater fault.** Previously either loop turned itself fully off the
+  moment the heater reported any fault, requiring the user to notice and
+  manually re-enable it -- for Prevent freezing in particular, a frost-
+  protection safety net going silently unarmed on a fault seemed like the
+  wrong failure mode. Instead, both loops now stay on and retry `start
+  thermostat` on a fixed backoff whenever a fault is blocking them: wait
+  5 minutes before the 1st retry, 15 minutes before the 2nd, 20 minutes
+  before the 3rd, then stop retrying until the fault actually clears
+  (which immediately resets the schedule for the next time). No longer
+  spams `start thermostat` into a persistent fault every
+  `MIN_ACTION_INTERVAL` (90s) either, which the old disable-on-fault
+  behavior had also been guarding against. New diagnostic sensors **Auto
+  thermostat note** / **Prevent freezing note** show which stage of the
+  backoff each loop is in, or what it gave up on. See DOCS.md, "Faults".
+- **Turning Auto thermostat on/off from Home Assistant now sends `start
+  thermostat`/`stop` immediately**, instead of waiting for the next poll
+  cycle's hysteresis check (which might not decide to act at all right
+  now -- e.g. cabin temp already above target when switching on). Ignores
+  the fault-retry backoff entirely: a direct on/off request from Home
+  Assistant always goes straight to the heater.
+
 ## 3.3.0
 
 - **The raw traffic capture log is now a rolling log, not a hard size

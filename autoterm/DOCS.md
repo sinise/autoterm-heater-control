@@ -419,9 +419,9 @@ heater is started (thermostat mode) whenever cabin temperature reaches the
 auto-thermostat climate entity is on or off, and regardless of a prior
 manual Stop.** That's the point of the feature: it can't be silently
 defeated by turning normal heating off or pressing Stop once -- only
-turning the Prevent freezing switch itself off disables it, with one
-exception: a heater-reported fault also turns it off automatically (see
-"Faults" below). Re-enable it once the fault is dealt with.
+turning the Prevent freezing switch itself off disables it. A
+heater-reported fault does **not** turn it off either -- see "Faults"
+below for what it does instead.
 
 It won't fight anything else, though: it never stops a heater run it
 didn't start (so it doesn't interrupt the auto-thermostat's own comfort
@@ -487,11 +487,20 @@ independent of debug mode. This app surfaces it two ways:
   goes back to `0`, so a fault that already cleared by the time you check
   Home Assistant doesn't just look like it never happened.
 
-If **Auto thermostat** or **Prevent freezing** is on when a fault appears,
-that loop turns itself off rather than keep re-issuing `start thermostat`
-every time it next sees the heater idle -- re-enable it yourself once
-you've dealt with the fault. Manual buttons are unaffected (a fault
-doesn't stop you from pressing Start/Stop).
+**Auto thermostat and Prevent freezing stay on through a fault** -- neither
+disables itself. Instead of either giving up or spamming `start thermostat`
+every 90 seconds into a fault that isn't clearing, each retries on a
+backoff: wait 5 minutes before the 1st retry, 15 minutes before the 2nd,
+20 minutes before the 3rd, then stop retrying until the fault actually
+clears (`Fault code` goes back to `0`, which immediately resets the
+schedule for next time). The new **Auto thermostat note** / **Prevent
+freezing note** sensors show which stage of the backoff each loop is
+currently in (e.g. "waiting 15min before retry 2/3"), or the fault it
+gave up on once the schedule is exhausted. Manual buttons are unaffected (a
+fault doesn't stop you from pressing Start/Stop), and turning Auto
+thermostat on/off from Home Assistant always sends `start thermostat`/
+`stop` immediately, regardless of a fault or the backoff state -- a direct
+request overrides the schedule rather than queuing behind it.
 
 The fault-code name table is the same partial, lower-confidence one used
 for "Fault (extended, named)" below -- only "no fault" (code 0) was
@@ -529,18 +538,21 @@ way, this is just a normal HA automation, nothing app-specific).
 A single "Autoterm Heater" device in Home Assistant with:
 
 - **Sensors**: State (idle/running/late-run/cooldown/final-shutdown), Fault
-  code, Fault (named), Last fault code, Last fault, Last fault time, Cabin
-  temperature, Temperature external sensor, Coolant temperature, Elapsed
-  run time
+  code, Fault (named), Last fault code, Last fault, Last fault time,
+  Temperature at display, Temperature external sensor, Coolant
+  temperature, Elapsed run time, Auto thermostat note, Prevent freezing
+  note (diagnostic -- see "Faults" above for the fault-retry backoff both
+  show)
 - **Binary sensors**: Burner active, Fault active, Telemetry stale
   (diagnostic -- turns on if no fresh status/cabin frames have arrived in
   25s, e.g. a wiring or port problem), Using external temperature sensor
   (diagnostic -- see "External temperature sensor" above)
 - **Climate entity** ("Autoterm thermostat"): mode `off`/`heat` toggles the
   app's own software hysteresis loop (stops the heater at target+1°C,
-  starts it at target-1°C in thermostat mode); shows the temperature
-  currently driving control (Temperature at display, or the external sensor if
-  active) and burner state as HVAC action
+  starts it at target-1°C in thermostat mode, and immediately sends
+  start/stop the moment the mode is changed -- see "Faults" above); shows
+  the temperature currently driving control (Temperature at display, or
+  the external sensor if active) and burner state as HVAC action
 - **Number**: Preheat duration (minutes), used by the Start preheat button;
   Prevent freezing target (°C, 0-10)
 - **Switch**: Prevent freezing -- see above; Use external temperature

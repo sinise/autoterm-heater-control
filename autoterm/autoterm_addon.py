@@ -77,6 +77,14 @@ EXTERNAL_TEMP_POLL_INTERVAL = 15.0
 # bus) with its own transient-failure modes.
 EXTERNAL_TEMP_STALE_AFTER = 90.0
 
+# Auto thermostat/Prevent freezing: backoff schedule for retrying `start
+# thermostat` while the heater is reporting a fault, instead of either
+# spamming it every MIN_ACTION_INTERVAL or disabling the loop outright.
+# 5min before the 1st retry, 15min before the 2nd, 20min before the 3rd,
+# then no more until the fault clears (requested as this exact schedule,
+# not derived from any vendor guidance on retry timing).
+FAULT_RETRY_DELAYS_S = (5 * 60, 15 * 60, 20 * 60)
+
 STATE_NAMES = {
     0x00: "idle",
     0x02: "running",
@@ -2050,7 +2058,13 @@ class AutoThermostat(threading.Thread):
     """Software hysteresis loop: stop at target+1, start (thermostat mode) at
     target-1. Runs independently of manual commands -- only acts when
     enabled, only on live/fresh cabin-temp readings. Rate-limited between its
-    own actions to avoid thrashing near a boundary."""
+    own actions to avoid thrashing near a boundary.
+
+    A fault does NOT disable this loop -- it stays armed and keeps retrying
+    on the backoff schedule in FAULT_RETRY_DELAYS_S (5min/15min/20min, then
+    gives up until the fault clears), rather than either spamming `start
+    thermostat` every MIN_ACTION_INTERVAL into a fault or shutting itself
+    off and requiring the user to notice and re-enable it."""
 
     HYSTERESIS = 1.0
     MIN_ACTION_INTERVAL = 90.0
@@ -2072,11 +2086,17 @@ class AutoThermostat(threading.Thread):
         # whole time -- without this latch we'd re-send stop every
         # MIN_ACTION_INTERVAL for the entire cooldown. Cleared once idle.
         self.stop_pending = False
+        self.fault_retry_count = 0
+        self.next_fault_retry_ts = None
+        self._fault_exhausted_logged = False
 
     def configure(self, enabled=None, target=None):
+        was_enabled = became_enabled = None
         with self.lock:
             if enabled is not None:
+                was_enabled = self.enabled
                 self.enabled = bool(enabled)
+                became_enabled = self.enabled
             if target is not None:
                 self.target = float(target)
             persisted = load_persisted()
@@ -2084,9 +2104,64 @@ class AutoThermostat(threading.Thread):
             persisted["auto_target"] = self.target
         save_persisted(persisted)
 
+        if became_enabled is None or became_enabled == was_enabled:
+            return
+        # Turning Auto thermostat on/off is a direct request from Home
+        # Assistant -- act on it immediately (regardless of fault/cabin
+        # temp) instead of waiting for the next poll cycle's hysteresis
+        # check, which might not want to act at all right now.
+        now = time.time()
+        try:
+            if became_enabled:
+                note = "Auto thermostat enabled -> sending start thermostat"
+                log.info("AUTO %s", note)
+                self.commander.start_thermostat()
+                self.fault_retry_count = 0
+                self.next_fault_retry_ts = None
+                self._fault_exhausted_logged = False
+            else:
+                note = "Auto thermostat disabled -> sending stop"
+                log.info("AUTO %s", note)
+                self.commander.stop()
+                self.stop_pending = False
+            self.last_action_ts = now
+            with self.lock:
+                self.last_note = note
+        except Exception as e:
+            log.error("AUTO immediate on/off action failed: %r", e)
+
     def snapshot(self):
         with self.lock:
             return {"enabled": self.enabled, "target": self.target, "last_note": self.last_note}
+
+    def _fault_retry_ready(self, fault, fault_name, now):
+        """Called only when the loop wants to start the heater but it's
+        currently faulted. Returns True once enough backoff time has
+        passed to attempt this retry (and arms the next one); False while
+        still waiting, or once FAULT_RETRY_DELAYS_S is exhausted."""
+        if self.fault_retry_count >= len(FAULT_RETRY_DELAYS_S):
+            if not self._fault_exhausted_logged:
+                note = (f"fault {fault} ({fault_name}) -> {len(FAULT_RETRY_DELAYS_S)} retries "
+                        f"exhausted, giving up until the fault clears")
+                log.warning("AUTO %s", note)
+                with self.lock:
+                    self.last_note = note
+                self._fault_exhausted_logged = True
+            return False
+        if self.next_fault_retry_ts is None:
+            delay = FAULT_RETRY_DELAYS_S[self.fault_retry_count]
+            self.next_fault_retry_ts = now + delay
+            note = (f"fault {fault} ({fault_name}) -> waiting {delay // 60:.0f}min before "
+                     f"retry {self.fault_retry_count + 1}/{len(FAULT_RETRY_DELAYS_S)}")
+            log.warning("AUTO %s", note)
+            with self.lock:
+                self.last_note = note
+            return False
+        if now < self.next_fault_retry_ts:
+            return False
+        self.fault_retry_count += 1
+        self.next_fault_retry_ts = None
+        return True
 
     def run(self):
         while not self.stop_evt.wait(self.POLL_INTERVAL):
@@ -2095,21 +2170,15 @@ class AutoThermostat(threading.Thread):
             if not enabled:
                 continue
 
-            # Checked before the action-rate-limit below, and independent of
-            # a fresh cabin-temp reading, so a fault gets a response within
-            # one POLL_INTERVAL rather than waiting out MIN_ACTION_INTERVAL
-            # or MAX_READING_AGE first.
             snap = self.model.snapshot()
             fault = snap.get("fault")
-            if fault:
-                note = f"fault {fault} ({snap.get('fault_name')}) -> disabling Auto thermostat"
-                log.error("AUTO %s", note)
-                self.configure(enabled=False)
-                with self.lock:
-                    self.last_note = note
-                continue
-
             now = time.time()
+
+            if not fault:
+                self.fault_retry_count = 0
+                self.next_fault_retry_ts = None
+                self._fault_exhausted_logged = False
+
             if now - self.last_action_ts < self.MIN_ACTION_INTERVAL:
                 continue
 
@@ -2131,7 +2200,11 @@ class AutoThermostat(threading.Thread):
                     with self.lock:
                         self.last_note = note
                 elif cabin <= target - self.HYSTERESIS and state == "idle":
+                    if fault and not self._fault_retry_ready(fault, snap.get("fault_name"), now):
+                        continue
                     note = f"cabin {cabin} <= {target - self.HYSTERESIS} -> start thermostat"
+                    if fault:
+                        note += f" (fault retry {self.fault_retry_count}/{len(FAULT_RETRY_DELAYS_S)})"
                     log.info("AUTO %s", note)
                     self.commander.start_thermostat()
                     self.last_action_ts = now
@@ -2147,7 +2220,10 @@ class PreventFreezing(threading.Thread):
     floor, REGARDLESS of the auto-thermostat's own enabled state or a prior
     manual Stop -- the whole point is that it can't be silently defeated by
     turning the normal comfort thermostat off or pressing Stop once.
-    Disabling this feature itself is the only way to turn it off.
+    Disabling this feature itself is the only way to turn it off -- a fault
+    does NOT disable it either (see FAULT_RETRY_DELAYS_S below), so it
+    stays the one thing standing between a faulted heater and a frozen
+    cabin rather than needing someone to notice and re-arm it.
 
     Never stops a heater run it didn't start itself (tracked via
     started_by_me), so it doesn't fight the auto-thermostat or a manual
@@ -2173,6 +2249,9 @@ class PreventFreezing(threading.Thread):
         self.last_action_ts = 0.0
         self.last_note = None
         self.started_by_me = False
+        self.fault_retry_count = 0
+        self.next_fault_retry_ts = None
+        self._fault_exhausted_logged = False
 
     def configure(self, enabled=None, target=None):
         with self.lock:
@@ -2189,6 +2268,34 @@ class PreventFreezing(threading.Thread):
         with self.lock:
             return {"enabled": self.enabled, "target": self.target, "last_note": self.last_note}
 
+    def _fault_retry_ready(self, fault, fault_name, now):
+        """See AutoThermostat._fault_retry_ready -- identical backoff
+        schedule and bookkeeping, kept as a separate copy since this loop
+        has its own independent state (started_by_me, its own target)."""
+        if self.fault_retry_count >= len(FAULT_RETRY_DELAYS_S):
+            if not self._fault_exhausted_logged:
+                note = (f"fault {fault} ({fault_name}) -> {len(FAULT_RETRY_DELAYS_S)} retries "
+                        f"exhausted, giving up until the fault clears")
+                log.warning("PREVENT-FREEZING %s", note)
+                with self.lock:
+                    self.last_note = note
+                self._fault_exhausted_logged = True
+            return False
+        if self.next_fault_retry_ts is None:
+            delay = FAULT_RETRY_DELAYS_S[self.fault_retry_count]
+            self.next_fault_retry_ts = now + delay
+            note = (f"fault {fault} ({fault_name}) -> waiting {delay // 60:.0f}min before "
+                     f"retry {self.fault_retry_count + 1}/{len(FAULT_RETRY_DELAYS_S)}")
+            log.warning("PREVENT-FREEZING %s", note)
+            with self.lock:
+                self.last_note = note
+            return False
+        if now < self.next_fault_retry_ts:
+            return False
+        self.fault_retry_count += 1
+        self.next_fault_retry_ts = None
+        return True
+
     def run(self):
         while not self.stop_evt.wait(self.POLL_INTERVAL):
             with self.lock:
@@ -2197,24 +2304,15 @@ class PreventFreezing(threading.Thread):
                 self.started_by_me = False
                 continue
 
-            # See AutoThermostat.run() for why this is checked before the
-            # rate-limit/staleness gates below. Disabling frost protection
-            # itself on a fault is a deliberate choice, not an oversight:
-            # blindly re-igniting into whatever just faulted seemed worse
-            # than surfacing it and leaving the heater alone -- flag via
-            # "Last fault"/an automation if this needs to escalate instead.
             snap = self.model.snapshot()
             fault = snap.get("fault")
-            if fault:
-                note = f"fault {fault} ({snap.get('fault_name')}) -> disabling Prevent freezing"
-                log.error("PREVENT-FREEZING %s", note)
-                self.configure(enabled=False)
-                self.started_by_me = False
-                with self.lock:
-                    self.last_note = note
-                continue
-
             now = time.time()
+
+            if not fault:
+                self.fault_retry_count = 0
+                self.next_fault_retry_ts = None
+                self._fault_exhausted_logged = False
+
             if now - self.last_action_ts < self.MIN_ACTION_INTERVAL:
                 continue
 
@@ -2228,7 +2326,11 @@ class PreventFreezing(threading.Thread):
 
             try:
                 if cabin <= target and state == "idle":
+                    if fault and not self._fault_retry_ready(fault, snap.get("fault_name"), now):
+                        continue
                     note = f"cabin {cabin} <= {target} (frost floor) -> start thermostat"
+                    if fault:
+                        note += f" (fault retry {self.fault_retry_count}/{len(FAULT_RETRY_DELAYS_S)})"
                     log.info("PREVENT-FREEZING %s", note)
                     self.commander.start_thermostat()
                     self.last_action_ts = now
@@ -2414,6 +2516,15 @@ def discovery_configs(profile):
         ),
         "min_temp": 5, "max_temp": 35, "temp_step": 0.5, "temperature_unit": "C",
     }))
+    entries.append((f"{DISCOVERY_PREFIX}/sensor/{NODE_ID}/auto_last_note/config", {
+        # What the Auto thermostat loop last actually did or decided --
+        # in particular, which stage of the fault-retry backoff it's in
+        # (see FAULT_RETRY_DELAYS_S) when the heater is faulted, since
+        # that's otherwise only visible in the app's own log.
+        **base, "name": "Auto thermostat note", "unique_id": f"{NODE_ID}_auto_last_note",
+        "state_topic": STATE_TOPIC, "value_template": blank_to_none("auto_last_note"),
+        "icon": "mdi:message-text-outline", "entity_category": "diagnostic",
+    }))
 
     entries.append((f"{DISCOVERY_PREFIX}/number/{NODE_ID}/preheat_minutes/config", {
         **base, "name": "Preheat duration", "unique_id": f"{NODE_ID}_preheat_minutes",
@@ -2452,6 +2563,13 @@ def discovery_configs(profile):
         "state_topic": STATE_TOPIC, "value_template": blank_to_none("prevent_freezing_target"),
         "min": 0, "max": 10, "step": 0.5, "unit_of_measurement": "°C", "mode": "box",
         "icon": "mdi:thermometer-low",
+    }))
+    entries.append((f"{DISCOVERY_PREFIX}/sensor/{NODE_ID}/prevent_freezing_last_note/config", {
+        # Same idea as "Auto thermostat note" above, for the independent
+        # Prevent freezing loop -- its own fault-retry backoff state.
+        **base, "name": "Prevent freezing note", "unique_id": f"{NODE_ID}_prevent_freezing_last_note",
+        "state_topic": STATE_TOPIC, "value_template": blank_to_none("prevent_freezing_last_note"),
+        "icon": "mdi:message-text-outline", "entity_category": "diagnostic",
     }))
     # -- debug controls -----------------------------------------------------
 
