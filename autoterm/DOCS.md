@@ -120,28 +120,22 @@ confused if it receives that frame (it's not something its own firmware
 was ever designed to parse). Since 1.1.0, the app filters that specific
 frame out of the heater->panel relay direction -- it's still decoded for
 the sensors below, and still logged (marked "NOT forwarded (filtered)") if
-capture logging is on, it just never lands on the panel's wire.
+capture logging is on, it just never lands on the panel's wire. As of a
+later rewrite this is now an unconditional per-frame check rather than a
+whole-relay mode switch -- see "How commands reach the heater" below for
+what changed and why.
 
-**A second, separate issue was found and (partially) fixed in 1.5.0:**
-sending the handshake itself, while it's queued to go out the same
-heater_port line the panel's own query/reply traffic is relayed over, can
-corrupt that traffic -- confirmed by reconstructing this app's own
-"Telemetry stale" logic against a real capture and matching it
-second-for-second to Home Assistant's actual stale/OK history, and by
-finding a real 18-byte heater reply missing 2 bytes immediately after a
-handshake send. It happened on roughly half of handshake sends, not all --
-consistent with a timing collision, not a guaranteed failure. 1.5.0 holds
-the handshake until the bus has been quiet for 250ms before sending it,
-which narrows the collision window, but this has not been re-validated
-against a fresh long capture the way the panel-confusion fix was --
-**treat debug mode as experimental**, not fully solved, and watch
-`Telemetry stale`/the capture log after updating rather than assuming this
-is now perfect.
+The handshake itself, along with every other command this app ever sends
+(Start/Stop/Preheat/Start pump), now goes through that same mechanism --
+see below for the full explanation. The upshot for debug mode specifically:
+sending PUBR0 no longer risks corrupting the panel's own query/reply
+exchange the way it could through 2.1.0-3.4.x (see those CHANGELOG entries
+for that history) -- there's no longer a shared, uncoordinated write to
+guess the timing of.
 
 There's also a **Send debug handshake now** button, for sending exactly one
 handshake on demand instead of waiting for the periodic timer -- useful for
-a single closely-watched test. It waits for the same quiet gap before
-sending.
+a single closely-watched test.
 
 The **Extended telemetry active** binary sensor tells you whether the
 heater is actually replying with the richer frame (turns on once a valid
@@ -149,14 +143,44 @@ heater is actually replying with the richer frame (turns on once a valid
 mode is on but this stays off, the handshake isn't getting a reply, which
 is itself useful information.
 
-**If you're seeing "no communication" glitches on the panel or the heater
-seeming to restart every 30-40 minutes with debug mode off**, that's not
-this issue -- see the 2.1.0 entry in CHANGELOG.md. The same quiet-gap
-protection above turned out to be missing from every other command this
-app injects too (Start preheat/thermostat, Stop, Start pump, including
-the automatic ones Auto thermostat/Prevent freezing send on their own),
-which is a much more likely cause of periodic disruption with debug mode
-off. Fixed in 2.1.0.
+**If you're seeing "no communication" glitches on the panel** -- narrowed
+considerably by the same rewrite mentioned above (see "How commands reach
+the heater"); if it's still happening, a capture log covering the moment
+it occurs is the most useful thing to send back for further diagnosis.
+
+## How commands reach the heater
+
+Every byte the physical panel and heater send each other passes straight
+through this app immediately, in both directions -- no parsing gates
+forwarding, so there's no added latency beyond whatever the OS/serial
+layer itself costs. The one standing exception is the extended telemetry
+frame just described, silently dropped from ever reaching the panel.
+
+Injecting a command (Start/Stop/Preheat/Start pump, or the PUBR0 handshake
+above) briefly interrupts that passthrough instead of writing onto the
+shared line uncoordinated the way earlier versions did (2.1.0 through
+3.4.x narrowed, but never eliminated, the resulting collision risk with
+a "wait for a quiet moment" heuristic -- see those CHANGELOG entries).
+Now: the app waits for the display's next routine status poll and the
+heater's reply to it to complete, remembers that reply, and then -- for
+well under a second, typically -- takes over both ports itself: the
+display's further queries during that window are answered directly from
+the just-remembered reply (or, for a few other routine query types, the
+last one seen) instead of ever reaching the real heater, while the actual
+command is sent and its reply awaited in isolation. Since nothing else
+could be talking to the heater during that window, whatever it replies
+with is unambiguously the answer to what was just sent -- no more guessing
+by frame shape or timing the way the old heuristic had to. Once the
+heater's replied (or a couple of seconds pass with no reply), normal
+passthrough resumes immediately.
+
+The one accepted gap: if the display happens to ask something other than
+a status poll (or one of a few other routine query types this app also
+remembers the last answer to) in that brief window, it goes unanswered
+until passthrough resumes a moment later, rather than being guessed at.
+In practice this is a rare, self-recovering blip, not a lasting "no
+communication" state -- watch the capture log if you want to confirm this
+against your own hardware.
 
 ## Heater profile: other models
 
@@ -630,14 +654,13 @@ indicator, not a calibrated wattage reading.
   before in this project from a wrong port/device-byte assumption -- see
   `docs/PROTOCOL.md`'s "Important history" note. Re-verify port assignment
   by content before assuming the command itself is wrong.
-- **Panel briefly shows "no communication"**: narrowed (not proven
-  eliminated) in 2.1.0 -- every command this app injects toward the
-  heater, including the automatic stop/start-thermostat calls Auto
-  thermostat/Prevent freezing make on their own, now waits for a quiet
-  moment on the bus first rather than landing mid-exchange with the panel.
-  See CHANGELOG.md and `docs/PROTOCOL.md`. A separate, still-unexplained
-  source of brief byte-level noise on the heater leg was also found and is
-  independent of anything this app sends -- see `docs/PROTOCOL.md`.
+- **Panel briefly shows "no communication"**: significantly narrowed by
+  the injection rewrite -- see "How commands reach the heater" above and
+  CHANGELOG.md/`docs/PROTOCOL.md` for the full history (2.1.0's original
+  quiet-moment heuristic through the current deterministic procedure). A
+  separate, still-unexplained source of brief byte-level noise on the
+  heater leg was also found and is independent of anything this app sends
+  -- see `docs/PROTOCOL.md`.
 - **The heater seems to restart on its own every 30-40 minutes**: this is
   **not** a bug in this app -- confirmed with a Bypass-mode capture (see
   above) that the exact same cycle happens with this app sending zero

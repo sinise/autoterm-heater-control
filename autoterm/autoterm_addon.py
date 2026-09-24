@@ -1059,51 +1059,16 @@ def build_pubr0_frame():
 
 
 def is_extended_telemetry_frame(raw):
-    """dev02, type01, 58-byte payload -- the frame unlocked by PUBR0. The
-    physical panel was never designed to receive this and gets visibly
-    confused by it (observed directly on real hardware -- see
-    docs/PROTOCOL.md), so it's filtered out of the HEATER->PANEL relay
-    direction rather than forwarded like everything else."""
-    return len(raw) > 4 and raw[1] == 0x02 and raw[4] == 0x01 and len(raw) - 7 == 58
-
-
-def is_injection_ack_candidate(raw):
-    """A short ack-class frame from the heater (dev00 or dev02, empty
-    payload) -- the shape seen both for the heater's ack to the display's
-    own cabin-temp report and, going by timing alone, its ack to a command
-    this add-on just injected. Injected frames use the same dev03 sender
-    identity as the real panel, so the heater can't tell the two apart
-    either -- there's no field to match on, only timing (see
-    StatusModel.arm_reply_suppression()). Only treated as "ours" within a
-    short window right after Commander sends something, not
-    unconditionally, to limit the chance of swallowing a genuine
-    display<->heater exchange that happens to land in that window."""
-    return len(raw) > 4 and raw[1] in (0x00, 0x02) and len(raw) - 7 == 0
-
-
-def heater_to_panel_should_filter(model):
-    """Whether the HEATER->PANEL relay needs to parse-before-forward right
-    now: either debug mode is on (the extended telemetry frame can appear
-    at any moment and must never reach the panel), or an injected command's
-    ack is still pending (see StatusModel.arm_reply_suppression()). Off
-    otherwise, so ordinary traffic gets true immediate passthrough."""
-    debug_enabled, _ = model.get_debug_settings()
-    return debug_enabled or model.should_suppress_reply()
-
-
-def make_heater_to_panel_filter(model):
-    """Per-frame drop decision for the HEATER->PANEL relay's filtering
-    path: always strip the extended telemetry frame, and additionally
-    swallow the one pending injection ack, if any (clearing the gate as
-    soon as it's used so nothing past that first match is affected)."""
-    def filter_fn(raw):
-        if is_extended_telemetry_frame(raw):
-            return True
-        if model.should_suppress_reply() and is_injection_ack_candidate(raw):
-            model.consume_reply_suppression()
-            return True
-        return False
-    return filter_fn
+    """dev02, type01 -- the frame unlocked by PUBR0. The physical panel was
+    never designed to receive this and gets visibly confused by it
+    (observed directly on real hardware -- see docs/PROTOCOL.md), so it's
+    filtered out of the HEATER->PANEL relay direction rather than
+    forwarded like everything else. Matched on dev+type alone, not a
+    specific payload length -- autoterm_flow_5's confirmed 58-byte payload
+    doesn't necessarily hold for other, untested heater profiles, and
+    dev02+type01 is unambiguous on its own (no other known frame uses that
+    combination)."""
+    return len(raw) > 4 and raw[1] == 0x02 and raw[4] == 0x01
 
 
 def decode_status_payload(payload):
@@ -1546,10 +1511,8 @@ class StatusModel:
         self.extended_ts = None
         self.cabin_temp = None
         self.cabin_temp_ts = None
-        self.last_frame_ts = None
         self.last_command = None
         self.last_fault = None
-        self._suppress_reply_until = None
         self.external_temp_entity = external_temp_entity or None
         self.external_temp = None
         self.external_temp_ts = None
@@ -1567,7 +1530,6 @@ class StatusModel:
         type_ = raw[4] if len(raw) > 4 else None
         payload = raw[5:-2]
         with self.lock:
-            self.last_frame_ts = ts
             if dev == 0x04 and type_ == 0x0F and len(payload) == 18:
                 self.status = decode_status_payload(payload)
                 self.status_ts = ts
@@ -1669,37 +1631,6 @@ class StatusModel:
     def get_capture_log_wanted(self):
         with self.lock:
             return self.capture_log_wanted
-
-    def get_last_frame_ts(self):
-        with self.lock:
-            return self.last_frame_ts
-
-    def arm_reply_suppression(self):
-        """Called right after Commander writes an injected frame: the next
-        short ack-shaped frame the heater sends (see
-        is_injection_ack_candidate) is withheld from the HEATER->PANEL relay
-        for SUPPRESS_WINDOW seconds, on the theory that it's the heater's
-        ack to what we just sent rather than something the real panel
-        needs to see."""
-        with self.lock:
-            self._suppress_reply_until = time.time() + SUPPRESS_WINDOW
-
-    def should_suppress_reply(self):
-        with self.lock:
-            if self._suppress_reply_until is None:
-                return False
-            if time.time() >= self._suppress_reply_until:
-                self._suppress_reply_until = None
-                return False
-            return True
-
-    def consume_reply_suppression(self):
-        """Called once a candidate ack frame has actually been withheld --
-        clears the window immediately rather than waiting it out, so a
-        second, unrelated ack-shaped frame arriving moments later (e.g. the
-        display's own type11 report) isn't also swallowed."""
-        with self.lock:
-            self._suppress_reply_until = None
 
     def snapshot(self, auto_snapshot=None, pf_snapshot=None, capture_status=None,
                  bypass_log_status=None):
@@ -1822,24 +1753,27 @@ class Relay(threading.Thread):
     """Transparent byte-for-byte passthrough in one direction, plus decoding
     and (if enabled) raw capture logging.
 
-    Bytes are forwarded immediately, before parsing, whenever there's
-    nothing that might need withholding -- passthrough latency is then
-    whatever the OS/serial layer itself costs, not an extra frame's worth
-    of buffering. `should_filter_fn` (if given) is polled once per read
-    cycle; only while it returns True does this relay switch to parsing
-    each chunk into full frames *before* writing anything (holding up to
-    ~1 frame's worth of extra latency), so `frame_filter_fn` can withhold a
-    matched frame from dst entirely instead of forwarding it.
+    Every frame is forwarded the moment it's complete -- no mode flag, no
+    globally-buffered path, the same for both directions and regardless of
+    debug mode. The one standing exception: HEATER->PANEL never forwards
+    the extended telemetry frame (dev02/type01, see
+    is_extended_telemetry_frame) -- confirmed on real hardware that
+    reaching the panel visibly confuses it. That's an unconditional,
+    per-frame check (cheap: two byte compares once a frame's header is
+    known), not a mode-gated buffering path -- it only ever matters when
+    the frame actually appears (debug mode having unlocked it via PUBR0),
+    and never adds anything to any other frame's latency.
 
-    Used for HEATER->PANEL, and deliberately scoped to only the moments
-    filtering is actually needed (debug mode streaming the extended frame,
-    or a just-injected command's ack still pending) rather than
-    unconditionally -- holding every single heater frame for a full parse,
-    all the time, was adding real latency to the panel's own display even
-    when there was nothing to filter (see docs/PROTOCOL.md)."""
+    Pauses entirely -- no reads, no writes -- while `injector.active` is
+    set: the Injector becomes the sole reader/writer of both ports for
+    that brief window. See Injector. Setting that flag doesn't pause this
+    thread instantly -- a read already in progress has to return first --
+    so `paused` is set only once this thread has actually stopped touching
+    either port, and the Injector waits on that instead of just assuming a
+    fixed delay is enough."""
 
     def __init__(self, name, sender_label, src, dst, dst_lock, model, capture_log, stop_evt,
-                 should_filter_fn=None, frame_filter_fn=None):
+                 injector, drop_extended=False, note_reply_fn=None):
         super().__init__(daemon=True, name=name)
         self.label = name
         self.sender_label = sender_label
@@ -1849,13 +1783,25 @@ class Relay(threading.Thread):
         self.model = model
         self.capture_log = capture_log
         self.stop_evt = stop_evt
-        self.should_filter_fn = should_filter_fn
-        self.frame_filter_fn = frame_filter_fn
+        self.injector = injector
+        self.drop_extended = drop_extended
+        self.note_reply_fn = note_reply_fn
         self.framer = Framer()
         self.error = None
+        self.paused = threading.Event()
+        injector.register_relay(self)
 
     def run(self):
         while not self.stop_evt.is_set():
+            if self.injector.active.is_set():
+                # The Injector owns both ports right now -- don't read
+                # (would race it for bytes) or write. Confirm we're
+                # genuinely stopped (see class docstring) before the
+                # Injector can rely on it.
+                self.paused.set()
+                self.injector.active.wait(timeout=0.05)
+                continue
+            self.paused.clear()
             try:
                 data = self.src.read(1)
                 if not data:
@@ -1868,32 +1814,6 @@ class Relay(threading.Thread):
                 return
 
             ts = time.time()
-            filtering = self.should_filter_fn is not None and self.should_filter_fn()
-
-            if not filtering:
-                try:
-                    with self.dst_lock:
-                        self.dst.write(data)
-                except serial.SerialException as e:
-                    self.error = str(e)
-                    log.error("%s write failed: %r", self.label, e)
-                    self.stop_evt.set()
-                    return
-
-                for ev in self.framer.feed(data):
-                    if ev[0] == "stray":
-                        self.capture_log.stray(ts, self.sender_label, ev[1])
-                        continue
-                    raw, crc_ok = ev[1], ev[2]
-                    self.capture_log.frame(ts, self.sender_label, raw, crc_ok)
-                    if crc_ok:
-                        self.model.note_frame(ts, self.label, raw)
-                continue
-
-            # Filtering path: must know what a chunk contains before
-            # forwarding it, so parse first and rebuild the output from
-            # the parsed events (byte-identical to the input except for
-            # whatever a matched frame is withheld).
             out = bytearray()
             for ev in self.framer.feed(data):
                 if ev[0] == "stray":
@@ -1901,14 +1821,15 @@ class Relay(threading.Thread):
                     self.capture_log.stray(ts, self.sender_label, ev[1])
                     continue
                 raw, crc_ok = ev[1], ev[2]
-                if crc_ok:
-                    self.model.note_frame(ts, self.label, raw)
-                drop = crc_ok and self.frame_filter_fn is not None and self.frame_filter_fn(raw)
-                if drop:
+                if self.drop_extended and crc_ok and is_extended_telemetry_frame(raw):
                     self.capture_log.frame(ts, self.sender_label, raw, crc_ok, note="NOT forwarded (filtered)")
                 else:
-                    self.capture_log.frame(ts, self.sender_label, raw, crc_ok)
                     out += raw
+                    self.capture_log.frame(ts, self.sender_label, raw, crc_ok)
+                if crc_ok:
+                    self.model.note_frame(ts, self.label, raw)
+                    if self.note_reply_fn is not None:
+                        self.note_reply_fn(raw)
 
             if out:
                 try:
@@ -1921,49 +1842,276 @@ class Relay(threading.Thread):
                     return
 
 
-# Shared by every code path that injects a frame toward the heater
-# (Commander, DebugSender): confirmed on real hardware that a frame landing
-# while the panel's own query/reply exchange is mid-flight can corrupt that
-# exchange (see DebugSender's docstring -- originally diagnosed for the
-# debug handshake specifically, but the mechanism is generic to anything
-# written to heater_ser, including AutoThermostat/PreventFreezing/manual
-# start-stop commands via Commander, which is why this lives at module
-# level instead of duplicated per class).
-QUIET_GAP = 0.25
-MAX_EXTRA_WAIT = 2.0
-
-# How long the HEATER->PANEL relay withholds the next ack-shaped frame after
-# Commander injects something (see StatusModel.arm_reply_suppression() and
-# is_injection_ack_candidate()) -- generous relative to the ~0.9s ack delay
-# seen in a real capture, without leaving it armed indefinitely.
-SUPPRESS_WINDOW = 1.5
-
-
-def wait_for_quiet_bus(model, stop_evt):
-    deadline = time.time() + MAX_EXTRA_WAIT
-    while time.time() < deadline and not stop_evt.is_set():
-        last = model.get_last_frame_ts()
-        if last is None or time.time() - last >= QUIET_GAP:
-            return
-        time.sleep(0.05)
-    # Gave up waiting for a quiet gap -- send anyway rather than delaying
-    # indefinitely if the bus is unusually busy.
+# The display query types the Injector opportunistically caches a reply
+# for during normal operation, so a future injection has something to
+# replay immediately: 0x0f (status poll), 0x11 (the display's own
+# cabin-temp report, acked by the heater), 0x06/0x04 (still-unidentified
+# query/reply pairs -- see docs/PROTOCOL.md's roadmap). Anything the
+# display sends during an injection pause that isn't one of these is left
+# unanswered for that brief window rather than guessed at.
+INJECTOR_KNOWN_QUERY_TYPES = (0x0F, 0x11, 0x06, 0x04)
+INJECT_REPLY_TIMEOUT = 2.0
+# How long to wait for a fresh status-poll/reply cycle to key an injection
+# off of before giving up on it entirely (see Injector._perform) -- well
+# above the display's own worst-observed gap between type0f polls.
+INJECT_START_TIMEOUT = 20.0
+# Fallback bound while waiting for each Relay to confirm it has actually
+# paused (Relay.paused) -- not the expected case (that's normally within
+# one read cycle, a few tens of ms), just a ceiling in case a relay thread
+# has died and will never set it.
+INJECTOR_PAUSE_CONFIRM_TIMEOUT = 2.0
 
 
-class Commander:
-    """Builds and injects command frames toward the heater, impersonating the panel."""
+class _PendingInjection:
+    __slots__ = ("frame", "timeout", "log_label", "note", "done", "reply")
 
-    def __init__(self, heater_ser, heater_lock, model, capture_log, stop_evt):
+    def __init__(self, frame, timeout, log_label, note):
+        self.frame = frame
+        self.timeout = timeout
+        self.log_label = log_label
+        self.note = note
+        self.done = threading.Event()
+        self.reply = None
+
+
+class Injector(threading.Thread):
+    """Sole path for every frame this app ever sends toward the heater --
+    Start/Stop/Preheat/Start pump and the periodic PUBR0 handshake alike --
+    replacing the old quiet-bus-wait timing heuristic and the old
+    ack-suppression heuristic (StatusModel.arm_reply_suppression() /
+    is_injection_ack_candidate(), gone as of this rewrite) with a
+    deterministic procedure:
+
+    1. A frame to send is queued (via inject()).
+    2. Wait for the display's next status poll (dev03/type0f) and the
+       heater's reply to it to complete naturally, and cache that reply.
+    3. Pause both Relay threads -- from here on this thread is the only
+       thing reading or writing either port.
+    4. While paused, answer the display directly from the per-query-type
+       cache (see INJECTOR_KNOWN_QUERY_TYPES) instead of ever forwarding
+       its queries to the real heater; anything else from the display goes
+       unanswered for this brief window.
+    5. Send the queued frame to the heater and wait for its reply. With
+       the display's channel fully diverted, nothing else could be talking
+       to the heater right now -- whatever comes back is unambiguously the
+       reply to what was just sent, no guessing by frame shape/timing
+       needed the way the old heuristic had to.
+    6. Un-pause -- both relays resume immediate passthrough."""
+
+    def __init__(self, panel_ser, heater_ser, panel_lock, heater_lock, model, capture_log, stop_evt):
+        super().__init__(daemon=True, name="injector")
+        self.panel_ser = panel_ser
         self.heater_ser = heater_ser
+        self.panel_lock = panel_lock
         self.heater_lock = heater_lock
         self.model = model
         self.capture_log = capture_log
         self.stop_evt = stop_evt
+        self.queue = queue.Queue()
+        self.active = threading.Event()
+        self._reply_cache = {}
+        self._reply_cache_lock = threading.Lock()
+        self._relays = []
+
+    # -- called by each Relay as it's constructed --------------------------
+
+    def register_relay(self, relay):
+        self._relays.append(relay)
+
+    # -- called by the HEATER->PANEL relay during normal operation --------
+
+    def note_reply(self, raw):
+        if len(raw) <= 4:
+            return
+        type_ = raw[4]
+        if type_ in INJECTOR_KNOWN_QUERY_TYPES:
+            with self._reply_cache_lock:
+                self._reply_cache[type_] = raw
+
+    def cached_reply_for(self, type_):
+        with self._reply_cache_lock:
+            return self._reply_cache.get(type_)
+
+    # -- public API used by Commander/DebugSender --------------------------
+
+    def inject(self, frame, timeout=INJECT_REPLY_TIMEOUT, log_label="INJECT", note=""):
+        """Enqueues a raw frame, blocks the calling thread until it's been
+        sent and the heater either replied or `timeout` elapsed. Returns
+        the heater's reply frame (bytes) or None."""
+        item = _PendingInjection(frame, timeout, log_label, note)
+        self.queue.put(item)
+        item.done.wait(INJECT_START_TIMEOUT + timeout + 2.0)
+        return item.reply
+
+    def run(self):
+        while not self.stop_evt.is_set():
+            try:
+                item = self.queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                self._perform(item)
+            except Exception as e:
+                log.error("INJECT failed: %r", e)
+            finally:
+                item.done.set()
+
+    def _perform(self, item):
+        # Step 2: need a fresh status reply to fall back on before
+        # diverting the display's channel -- wait briefly for one if
+        # nothing's been observed yet (e.g. right at startup).
+        deadline = time.time() + INJECT_START_TIMEOUT
+        while self.cached_reply_for(0x0F) is None and time.time() < deadline and not self.stop_evt.is_set():
+            time.sleep(0.05)
+        cached_status = self.cached_reply_for(0x0F)
+        if cached_status is None:
+            log.error("%s: no status reply observed yet, giving up on %s", item.log_label, item.frame.hex(" "))
+            return
+
+        # Step 3: pause both relays. Setting the flag doesn't instantly stop
+        # them -- each Relay thread only notices it between read cycles,
+        # and a read already in flight has to return first -- so wait for
+        # each one's own confirmation (Relay.paused) that it has actually
+        # stopped touching its port, with a bounded fallback in case a
+        # relay thread has died, rather than just assuming a fixed delay
+        # was enough.
+        self.active.set()
+        deadline = time.time() + INJECTOR_PAUSE_CONFIRM_TIMEOUT
+        for relay in self._relays:
+            relay.paused.wait(timeout=max(0.0, deadline - time.time()))
+        try:
+            self._converse(item, cached_status)
+        finally:
+            self.active.clear()
+
+    def _service_panel_queries(self, panel_framer, cached_status):
+        """Answers any complete display query currently sitting in
+        panel_ser directly from the reply cache -- its query never reaches
+        the real heater during the pause. Called both as an initial flush
+        right before writing (a query that slipped through right as the
+        relays were confirming paused still deserves a reply, the same as
+        one arriving after) and on every iteration of _converse's wait
+        loop below."""
+        try:
+            n = self.panel_ser.in_waiting
+        except serial.SerialException:
+            return
+        if not n:
+            return
+        data = self.panel_ser.read(n)
+        for ev in panel_framer.feed(data):
+            if ev[0] != "frame" or not ev[2]:
+                continue
+            q_type = ev[1][4] if len(ev[1]) > 4 else None
+            cached = cached_status if q_type == 0x0F else self.cached_reply_for(q_type)
+            if cached is None:
+                continue  # not a known type -- left unanswered for this window
+            with self.panel_lock:
+                self.panel_ser.write(cached)
+            self.capture_log.frame(time.time(), "rpi", cached, True, note="replayed cached reply during injection")
+
+    def _converse(self, item, cached_status):
+        panel_framer = Framer()
+        heater_framer = Framer()
+
+        # Handle whatever's already sitting in either port's buffer before
+        # writing -- it necessarily predates this injection. Panel-side,
+        # route it through the same reply-from-cache logic as the wait
+        # loop below rather than just discarding it, so a query that
+        # slipped through right as the relays were pausing still gets
+        # answered. Heater-side, anything already buffered can only be
+        # stale leftover output -- never a reply to a frame that hasn't
+        # been sent yet -- so it's simply dropped; left unread, it could
+        # otherwise be mistaken below for the reply to what's about to be
+        # sent.
+        self._service_panel_queries(panel_framer, cached_status)
+        try:
+            if self.heater_ser.in_waiting:
+                self.heater_ser.read(self.heater_ser.in_waiting)
+        except serial.SerialException:
+            pass
+
+        with self.heater_lock:
+            self.heater_ser.write(item.frame)
+        ts = time.time()
+        tag = f"{item.note} " if item.note else ""
+        log.info("%s sent %s%s", item.log_label, tag, item.frame.hex(" "))
+        self.capture_log.raw_send(ts, "rpi", item.frame, note=item.note)
+        self.model.note_command(f"sent {tag}{item.frame.hex(' ')}")
+
+        deadline = time.time() + item.timeout
+        reply = None
+        while time.time() < deadline and reply is None and not self.stop_evt.is_set():
+            # Step 4: answer the display directly from cache.
+            self._service_panel_queries(panel_framer, cached_status)
+
+            # Step 5: watch for the heater's reply to what we just sent.
+            try:
+                n = self.heater_ser.in_waiting
+            except serial.SerialException:
+                n = 0
+            if n:
+                data = self.heater_ser.read(n)
+                for ev in heater_framer.feed(data):
+                    if ev[0] == "stray":
+                        self.capture_log.stray(time.time(), "heater", ev[1])
+                        continue
+                    raw, crc_ok = ev[1], ev[2]
+                    if crc_ok:
+                        self.model.note_frame(time.time(), "HEATER->PANEL", raw)
+                    # A *non-empty-payload* frame typed as one of the
+                    # display's own known query types (the 18-byte status
+                    # reply, in particular) can only be a reply to a query
+                    # the display itself sent -- never to something this
+                    # app injects -- so it's not a candidate for `reply`
+                    # even though it arrived during the pause. Extremely
+                    # narrow case in practice (needs a query to have
+                    # slipped through to the real heater right as the
+                    # pause began, with its reply landing exactly during
+                    # this window), but real: without this check such a
+                    # reply would otherwise be the first complete frame
+                    # seen and get mistaken for the actual reply to what
+                    # was just sent. Deliberately NOT excluding by type
+                    # alone: a genuine command ack is itself a short,
+                    # empty-payload frame that can share a query type
+                    # (dev00/type11, the same shape as the heater's ack to
+                    # the display's own cabin-temp report) -- there's
+                    # nothing in the frame to tell those two apart, which
+                    # is exactly why this procedure exists instead of
+                    # guessing by content.
+                    q_type = raw[4] if len(raw) > 4 else None
+                    non_empty = len(raw) - 7 > 0
+                    if crc_ok and non_empty and q_type in INJECTOR_KNOWN_QUERY_TYPES:
+                        self.capture_log.frame(time.time(), "heater", raw, crc_ok,
+                                                note="stale reply to the display's own query, not ours -- ignored")
+                        continue
+                    self.capture_log.frame(time.time(), "heater", raw, crc_ok, note="injection reply")
+                    if crc_ok:
+                        reply = raw
+                        break
+            if reply is None:
+                time.sleep(0.01)
+
+        item.reply = reply
+        if reply is None:
+            log.warning("%s: no reply from heater within %.1fs for %s",
+                        item.log_label, item.timeout, item.frame.hex(" "))
+
+
+class Commander:
+    """Builds command frames and hands them to the Injector, impersonating
+    the panel (sender byte 0x03 -- confirmed to be the device that
+    originates every start/stop handshake)."""
+
+    def __init__(self, injector, model, capture_log):
+        self.injector = injector
+        self.model = model
+        self.capture_log = capture_log
 
     def _send(self, dev, type_, payload=b""):
-        """Returns True if a frame actually went out, False if bypass mode
-        suppressed it -- callers use this to decide whether to record a
-        start-mode change or send a follow-up frame."""
+        """Returns True if a frame was actually queued, False if bypass
+        mode suppressed it -- callers use this to decide whether to send a
+        follow-up frame."""
         if self.model.get_bypass_mode():
             log.warning(
                 "BYPASS: not sending dev=%02x type=%02x payload=%s (bypass mode "
@@ -1971,24 +2119,8 @@ class Commander:
                 dev, type_, payload.hex(" "),
             )
             return False
-        wait_for_quiet_bus(self.model, self.stop_evt)
-        frame = build_frame(dev, type_, payload)
-        try:
-            with self.heater_lock:
-                self.heater_ser.write(frame)
-            ts = time.time()
-            log.info("INJECT sent %s", frame.hex(" "))
-            self.capture_log.raw_send(ts, "rpi", frame)
-            self.model.note_command(f"sent {frame.hex(' ')}")
-            self.model.arm_reply_suppression()
-            return True
-        except Exception as e:
-            log.error("INJECT failed %s: %r", frame.hex(" "), e)
-            self.model.note_command(f"FAILED to send {frame.hex(' ')}: {e!r}")
-            raise
-
-    # Sender byte 0x03 = panel/display -- confirmed to be the device that
-    # originates every start/stop handshake. We impersonate it here.
+        self.injector.inject(build_frame(dev, type_, payload))
+        return True
 
     def start_preheat(self, minutes):
         minutes = max(0, min(int(minutes), 600))
@@ -2016,29 +2148,15 @@ class Commander:
 
 
 class DebugSender(threading.Thread):
-    """Periodically re-sends the vendor diagnostic tool's PUBR0 handshake
-    toward the heater, when debug mode is enabled -- unlocks the extended
-    telemetry frame decoded by decode_extended_payload() above.
+    """Periodically hands the vendor diagnostic tool's PUBR0 handshake to
+    the Injector, when debug mode is enabled -- unlocks the extended
+    telemetry frame decoded by decode_extended_payload() above. Sent
+    through the same deterministic injection procedure as every other
+    command now (see Injector) -- no separate timing logic needed here."""
 
-    Confirmed on real hardware (a live capture, reconstructing this add-on's
-    own staleness logic against it and matching it second-for-second to
-    Home Assistant's own "Telemetry stale" history): sending the handshake
-    while the panel's own query/reply exchange is mid-flight on the shared
-    heater_port line can corrupt that exchange -- a real 18-byte heater
-    reply was seen missing 2 bytes immediately after a handshake send. It
-    happened on roughly half of the handshake sends, not all -- consistent
-    with a timing collision, not a deterministic effect. To reduce this,
-    the handshake is held until the bus has been quiet for QUIET_GAP
-    seconds (no frame seen from either device) rather than fired blindly on
-    a fixed timer -- see wait_for_quiet_bus() above (shared with Commander,
-    which turned out to need the same protection for its own injected
-    commands). This narrows the collision window but doesn't formally prove
-    it's eliminated; still treat this as experimental (see DOCS.md)."""
-
-    def __init__(self, heater_ser, heater_lock, model, capture_log, stop_evt):
+    def __init__(self, injector, model, capture_log, stop_evt):
         super().__init__(daemon=True, name="debug-sender")
-        self.heater_ser = heater_ser
-        self.heater_lock = heater_lock
+        self.injector = injector
         self.model = model
         self.capture_log = capture_log
         self.stop_evt = stop_evt
@@ -2047,20 +2165,7 @@ class DebugSender(threading.Thread):
         if self.model.get_bypass_mode():
             log.warning("BYPASS: not sending PUBR0 handshake (bypass mode enabled)")
             return
-        frame = build_pubr0_frame()
-        try:
-            with self.heater_lock:
-                self.heater_ser.write(frame)
-            ts = time.time()
-            log.info("DEBUG sent PUBR0 handshake %s", frame.hex(" "))
-            self.capture_log.raw_send(ts, "rpi", frame, note="PUBR0 handshake")
-            self.model.note_command(f"sent PUBR0 handshake {frame.hex(' ')}")
-        except Exception as e:
-            log.error("DEBUG PUBR0 send failed: %r", e)
-
-    def send_when_quiet(self):
-        wait_for_quiet_bus(self.model, self.stop_evt)
-        self.send_once()
+        self.injector.inject(build_pubr0_frame(), log_label="DEBUG", note="PUBR0 handshake")
 
     def run(self):
         while not self.stop_evt.is_set():
@@ -2069,7 +2174,7 @@ class DebugSender(threading.Thread):
                 if self.stop_evt.wait(1.0):
                     return
                 continue
-            self.send_when_quiet()
+            self.send_once()
             if self.stop_evt.wait(max(5, interval)):
                 return
 
@@ -2811,20 +2916,22 @@ class Bridge:
         self.panel_ser = serial.Serial(cfg["panel_port"], cfg["baud"], timeout=0.05)
         self.heater_ser = serial.Serial(cfg["heater_port"], cfg["baud"], timeout=0.05)
 
-        self.commander = Commander(self.heater_ser, self.heater_lock, self.model, self._wire_log, self.stop_evt)
+        self.injector = Injector(
+            self.panel_ser, self.heater_ser, self.panel_lock, self.heater_lock,
+            self.model, self._wire_log, self.stop_evt)
+        self.commander = Commander(self.injector, self.model, self._wire_log)
         self.auto = AutoThermostat(self.model, self.commander, self.stop_evt, cfg["auto_target_default"])
         self.prevent_freezing = PreventFreezing(
             self.model, self.commander, self.stop_evt, cfg["prevent_freezing_target_default"])
-        self.debug_sender = DebugSender(self.heater_ser, self.heater_lock, self.model, self._wire_log, self.stop_evt)
+        self.debug_sender = DebugSender(self.injector, self.model, self._wire_log, self.stop_evt)
 
         self.panel_to_heater = Relay(
             "PANEL->HEATER", "display", self.panel_ser, self.heater_ser, self.heater_lock,
-            self.model, self._wire_log, self.stop_evt)
+            self.model, self._wire_log, self.stop_evt, self.injector)
         self.heater_to_panel = Relay(
             "HEATER->PANEL", "heater", self.heater_ser, self.panel_ser, self.panel_lock,
-            self.model, self._wire_log, self.stop_evt,
-            should_filter_fn=lambda: heater_to_panel_should_filter(self.model),
-            frame_filter_fn=make_heater_to_panel_filter(self.model))
+            self.model, self._wire_log, self.stop_evt, self.injector,
+            drop_extended=True, note_reply_fn=self.injector.note_reply)
 
         self.mqtt = mqtt.Client(client_id=f"{NODE_ID}-bridge", clean_session=True)
         if cfg.get("mqtt_username"):
@@ -2894,7 +3001,7 @@ class Bridge:
         elif suffix == "debug_interval/set":
             self.model.set_debug_interval(float(payload))
         elif suffix == "send_debug_handshake":
-            self.debug_sender.send_when_quiet()
+            self.debug_sender.send_once()
         elif suffix == "capture_log/set":
             wanted = payload.upper() == "ON"
             self.model.set_capture_log_wanted(wanted)
@@ -2938,6 +3045,7 @@ class Bridge:
         # Relay + command handling start regardless of MQTT status -- the
         # physical panel must keep working even if Home Assistant/MQTT is
         # completely unreachable, same as the base add-on's passthrough.
+        self.injector.start()
         self.panel_to_heater.start()
         self.heater_to_panel.start()
         self.auto.start()
@@ -2994,6 +3102,7 @@ class Bridge:
         self.auto.join(timeout=1.0)
         self.prevent_freezing.join(timeout=1.0)
         self.debug_sender.join(timeout=1.0)
+        self.injector.join(timeout=1.0)
         self.capture_log.stop()
         self.bypass_log.stop()
         log.removeHandler(self._capture_log_handler)

@@ -299,6 +299,30 @@ connected -- two distinct failure modes found, one fixed, one narrowed:**
      whether withholding it actually helps the panel; watch for it
      mismatching (swallowing a frame the panel needed, or missing the real
      ack) if picking this up again.
+   - **Superseded in a later rewrite** ("simplify and make it less
+     interfering", requested directly): the 250ms quiet-gap wait and the
+     1.5s ack-suppression window above are both gone, replaced by a
+     deterministic procedure rather than a timing heuristic. Every
+     injected command (PUBR0 included) is now queued; the app waits for
+     the display's next routine status poll/reply to complete, remembers
+     that reply, then takes over both ports for the duration of the
+     injection -- the display's further queries are answered directly
+     from that remembered reply (or, for cabin-temp reports and two other
+     routine query types, the last one seen) instead of ever reaching the
+     real heater, while the injected command is sent and its reply
+     awaited in isolation. Because nothing else can be talking to the
+     heater during that window, its reply is unambiguous -- no more
+     guessing by frame shape/timing the way is_injection_ack_candidate()
+     had to. Verified extensively against simulated panel/heater traffic
+     (hundreds of injection cycles with concurrent display polling,
+     including deliberately adversarial back-to-back timing) but **not
+     yet against real hardware** -- watch the capture log and `Telemetry
+     stale` after upgrading, the way every debug-mode change here has
+     asked before it. Also removes the separate "hold every heater->panel
+     frame during debug mode" behavior from v3.1.0's fix above: the
+     extended-frame filter (1) is now an unconditional per-frame check
+     rather than a mode-gated buffering path, so heater->panel passthrough
+     is immediate regardless of debug mode.
 
 Frame: `AA | 02 | 3a 00 | 01 | <58-byte payload> | crc16`. Indices below
 are 0-based into that 58-byte payload.

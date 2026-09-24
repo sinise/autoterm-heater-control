@@ -1,5 +1,38 @@
 # Changelog
 
+## 3.5.0
+
+- **Rewrote how commands are injected toward the heater**, replacing the
+  timing heuristics used since 2.1.0/3.1.0 (a 250ms "wait for a quiet
+  moment" delay, plus a 1.5s window that guessed which heater reply was
+  an injected command's own ack by frame shape alone) with a deterministic
+  procedure. Every command -- Start/Stop/Preheat/Start pump, and the
+  periodic PUBR0 handshake -- now goes through one shared queue: wait for
+  the display's next routine status poll/reply to complete, remember that
+  reply, then take over both ports for the (typically well under a
+  second) duration of the injection -- the display's further queries
+  during that window are answered directly from the remembered reply (or,
+  for a few other routine query types, the last one seen) instead of ever
+  reaching the real heater, while the actual command is sent and its
+  reply awaited in isolation. Since nothing else can be talking to the
+  heater during that window, its reply is unambiguous -- no more frame-
+  shape/timing guessing. The one accepted gap: a display query that isn't
+  one of the routine types this app remembers goes unanswered for that
+  brief window rather than guessed at.
+- **The extended-telemetry-frame filter is now an unconditional per-frame
+  check instead of a mode-gated buffering path.** Previously, whenever
+  debug mode was on, the entire HEATER->PANEL direction held every frame
+  for a full parse before forwarding it (3.1.0's fix only avoided this
+  while debug mode was off). Now every frame is forwarded the moment it's
+  complete regardless of debug mode, with only the specific dev02/type01
+  frame ever held back and discarded.
+- Verified extensively in simulation (hundreds of injection cycles against
+  simulated panel/heater traffic, including deliberately adversarial
+  back-to-back timing) but **not yet against real hardware** -- watch the
+  capture log and `Telemetry stale` after upgrading. See docs/PROTOCOL.md
+  for the full technical writeup and this app's own DOCS.md ("How
+  commands reach the heater") for the user-facing explanation.
+
 ## 3.4.2
 
 - **Fixed a real gap in the 3.2.2 by-id resolution**: `resolve_by_id()`
