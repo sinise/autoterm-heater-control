@@ -1,5 +1,29 @@
 # Changelog
 
+## 3.5.1
+
+- **Fixed PUBR0/extended telemetry never getting a reply, found on the
+  first real-hardware test of 3.5.0's rewrite.** That rewrite diverted
+  the display's channel for the full reply-wait window on every injected
+  command, PUBR0 included -- but PUBR0 isn't a discrete request/reply the
+  way Start/Stop are: the heater begins an independent ~1/sec extended-
+  telemetry stream on its own schedule afterward, and apparently needs
+  the display's normal polling to keep flowing uninterrupted for that
+  stream to start at all (unconfirmed why exactly). Confirmed against a
+  real ~5-minute capture: zero extended frames across multiple PUBR0
+  sends including a manual one, while Start/Stop injection worked
+  correctly in the same capture. Fixed: PUBR0 now only diverts for as
+  long as it takes to write the 15-byte handshake itself, then resumes
+  passthrough immediately rather than waiting for a reply -- whatever
+  the heater streams afterward arrives through the normal, resumed relay
+  like any other frame, still filtered from the panel and decoded as
+  before. Start/Stop/Preheat/Start pump are unaffected -- confirmed
+  correct against the same real capture (the heater's actual ack:
+  `dev02`/`type04`, empty payload, notably sharing a query type with a
+  routine display exchange -- exactly the ambiguity the divert procedure
+  exists to sidestep rather than guess at). This fix itself verified in
+  simulation, not yet re-confirmed against real hardware.
+
 ## 3.5.0
 
 - **Rewrote how commands are injected toward the heater**, replacing the

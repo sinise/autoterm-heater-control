@@ -1863,13 +1863,14 @@ INJECTOR_PAUSE_CONFIRM_TIMEOUT = 2.0
 
 
 class _PendingInjection:
-    __slots__ = ("frame", "timeout", "log_label", "note", "done", "reply")
+    __slots__ = ("frame", "timeout", "log_label", "note", "wait_for_reply", "done", "reply")
 
-    def __init__(self, frame, timeout, log_label, note):
+    def __init__(self, frame, timeout, log_label, note, wait_for_reply):
         self.frame = frame
         self.timeout = timeout
         self.log_label = log_label
         self.note = note
+        self.wait_for_reply = wait_for_reply
         self.done = threading.Event()
         self.reply = None
 
@@ -1882,7 +1883,7 @@ class Injector(threading.Thread):
     is_injection_ack_candidate(), gone as of this rewrite) with a
     deterministic procedure:
 
-    1. A frame to send is queued (via inject()).
+    1. A frame to send is queued (via inject() or inject_fire_and_forget()).
     2. Wait for the display's next status poll (dev03/type0f) and the
        heater's reply to it to complete naturally, and cache that reply.
     3. Pause both Relay threads -- from here on this thread is the only
@@ -1891,11 +1892,15 @@ class Injector(threading.Thread):
        cache (see INJECTOR_KNOWN_QUERY_TYPES) instead of ever forwarding
        its queries to the real heater; anything else from the display goes
        unanswered for this brief window.
-    5. Send the queued frame to the heater and wait for its reply. With
-       the display's channel fully diverted, nothing else could be talking
-       to the heater right now -- whatever comes back is unambiguously the
-       reply to what was just sent, no guessing by frame shape/timing
-       needed the way the old heuristic had to.
+    5. Send the queued frame to the heater. inject() then waits for its
+       reply -- with the display's channel fully diverted, nothing else
+       could be talking to the heater right now, so whatever comes back is
+       unambiguously the reply to what was just sent, no guessing by frame
+       shape/timing needed the way the old heuristic had to.
+       inject_fire_and_forget() skips this wait entirely (see its
+       docstring -- needed for PUBR0, confirmed on real hardware that
+       holding the divert open for a reply prevents the heater's
+       independent extended-telemetry stream from ever starting).
     6. Un-pause -- both relays resume immediate passthrough."""
 
     def __init__(self, panel_ser, heater_ser, panel_lock, heater_lock, model, capture_log, stop_evt):
@@ -1938,10 +1943,29 @@ class Injector(threading.Thread):
         """Enqueues a raw frame, blocks the calling thread until it's been
         sent and the heater either replied or `timeout` elapsed. Returns
         the heater's reply frame (bytes) or None."""
-        item = _PendingInjection(frame, timeout, log_label, note)
+        item = _PendingInjection(frame, timeout, log_label, note, wait_for_reply=True)
         self.queue.put(item)
         item.done.wait(INJECT_START_TIMEOUT + timeout + 2.0)
         return item.reply
+
+    def inject_fire_and_forget(self, frame, log_label="INJECT", note=""):
+        """Like inject(), but doesn't hold the display's channel diverted
+        waiting for a reply -- pauses only for as long as it takes to
+        write the frame, then resumes passthrough immediately. For PUBR0
+        specifically: confirmed on real hardware that holding the divert
+        open for the usual reply-wait window prevents the heater's
+        extended-telemetry stream from ever starting at all (PUBR0 isn't
+        a discrete request/reply the way Start/Stop are -- the heater
+        begins an independent ~1/sec stream on its own schedule, and it
+        apparently needs the display's normal polling to keep flowing
+        uninterrupted to do that). Whatever the heater sends afterward
+        still reaches this app normally through the resumed relay -- the
+        extended frame is filtered from the panel unconditionally
+        regardless of how it arrived (see Relay's drop_extended), and
+        still decoded via note_frame() like any other frame."""
+        item = _PendingInjection(frame, 0.0, log_label, note, wait_for_reply=False)
+        self.queue.put(item)
+        item.done.wait(INJECT_START_TIMEOUT + 2.0)
 
     def run(self):
         while not self.stop_evt.is_set():
@@ -2038,6 +2062,13 @@ class Injector(threading.Thread):
         log.info("%s sent %s%s", item.log_label, tag, item.frame.hex(" "))
         self.capture_log.raw_send(ts, "rpi", item.frame, note=item.note)
         self.model.note_command(f"sent {tag}{item.frame.hex(' ')}")
+
+        if not item.wait_for_reply:
+            # Fire-and-forget (see inject_fire_and_forget): the write
+            # itself is done, resume passthrough immediately rather than
+            # holding the divert open for a reply that isn't a discrete
+            # request/reply to begin with.
+            return
 
         deadline = time.time() + item.timeout
         reply = None
@@ -2165,7 +2196,7 @@ class DebugSender(threading.Thread):
         if self.model.get_bypass_mode():
             log.warning("BYPASS: not sending PUBR0 handshake (bypass mode enabled)")
             return
-        self.injector.inject(build_pubr0_frame(), log_label="DEBUG", note="PUBR0 handshake")
+        self.injector.inject_fire_and_forget(build_pubr0_frame(), log_label="DEBUG", note="PUBR0 handshake")
 
     def run(self):
         while not self.stop_evt.is_set():

@@ -125,13 +125,15 @@ later rewrite this is now an unconditional per-frame check rather than a
 whole-relay mode switch -- see "How commands reach the heater" below for
 what changed and why.
 
-The handshake itself, along with every other command this app ever sends
-(Start/Stop/Preheat/Start pump), now goes through that same mechanism --
-see below for the full explanation. The upshot for debug mode specifically:
-sending PUBR0 no longer risks corrupting the panel's own query/reply
-exchange the way it could through 2.1.0-3.4.x (see those CHANGELOG entries
-for that history) -- there's no longer a shared, uncoordinated write to
-guess the timing of.
+The handshake itself now goes through the same brief-divert mechanism
+every other command uses (see "How commands reach the heater" below),
+though not identically -- it doesn't wait around for a reply the way
+Start/Stop do, since its "reply" is an independent stream rather than a
+single answer (see that section for why). The upshot for debug mode
+specifically: sending PUBR0 no longer risks corrupting the panel's own
+query/reply exchange the way it could through 2.1.0-3.4.x (see those
+CHANGELOG entries for that history) -- there's no longer a shared,
+uncoordinated write to guess the timing of.
 
 There's also a **Send debug handshake now** button, for sending exactly one
 handshake on demand instead of waiting for the periodic timer -- useful for
@@ -156,23 +158,22 @@ forwarding, so there's no added latency beyond whatever the OS/serial
 layer itself costs. The one standing exception is the extended telemetry
 frame just described, silently dropped from ever reaching the panel.
 
-Injecting a command (Start/Stop/Preheat/Start pump, or the PUBR0 handshake
-above) briefly interrupts that passthrough instead of writing onto the
-shared line uncoordinated the way earlier versions did (2.1.0 through
-3.4.x narrowed, but never eliminated, the resulting collision risk with
-a "wait for a quiet moment" heuristic -- see those CHANGELOG entries).
-Now: the app waits for the display's next routine status poll and the
-heater's reply to it to complete, remembers that reply, and then -- for
-well under a second, typically -- takes over both ports itself: the
-display's further queries during that window are answered directly from
-the just-remembered reply (or, for a few other routine query types, the
-last one seen) instead of ever reaching the real heater, while the actual
-command is sent and its reply awaited in isolation. Since nothing else
-could be talking to the heater during that window, whatever it replies
-with is unambiguously the answer to what was just sent -- no more guessing
-by frame shape or timing the way the old heuristic had to. Once the
-heater's replied (or a couple of seconds pass with no reply), normal
-passthrough resumes immediately.
+Injecting a command (Start/Stop/Preheat/Start pump) briefly interrupts
+that passthrough instead of writing onto the shared line uncoordinated
+the way earlier versions did (2.1.0 through 3.4.x narrowed, but never
+eliminated, the resulting collision risk with a "wait for a quiet moment"
+heuristic -- see those CHANGELOG entries). Now: the app waits for the
+display's next routine status poll and the heater's reply to it to
+complete, remembers that reply, and then -- for well under a second,
+typically -- takes over both ports itself: the display's further queries
+during that window are answered directly from the just-remembered reply
+(or, for a few other routine query types, the last one seen) instead of
+ever reaching the real heater, while the actual command is sent and its
+reply awaited in isolation. Since nothing else could be talking to the
+heater during that window, whatever it replies with is unambiguously the
+answer to what was just sent -- no more guessing by frame shape or timing
+the way the old heuristic had to. Once the heater's replied (or a couple
+of seconds pass with no reply), normal passthrough resumes immediately.
 
 The one accepted gap: if the display happens to ask something other than
 a status poll (or one of a few other routine query types this app also
@@ -181,6 +182,19 @@ until passthrough resumes a moment later, rather than being guessed at.
 In practice this is a rare, self-recovering blip, not a lasting "no
 communication" state -- watch the capture log if you want to confirm this
 against your own hardware.
+
+**The PUBR0 handshake (see "Debug mode" above) is the one exception** to
+"waits for the reply in isolation": it isn't a discrete request/reply the
+way Start/Stop are -- the heater begins an independent ~1/sec extended-
+telemetry stream on its own schedule afterward, not a single answer to
+wait for. Confirmed on real hardware that holding the display's channel
+diverted for the usual reply-wait window prevented that stream from ever
+starting at all. So PUBR0 only diverts for as long as it takes to write
+the 15-byte handshake itself (well under one round of normal polling),
+then passthrough resumes immediately -- whatever the heater streams
+afterward arrives through the normal, resumed relay like any other
+frame, still unconditionally filtered from the panel and still decoded
+for the sensors below.
 
 ## Heater profile: other models
 

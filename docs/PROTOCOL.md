@@ -323,6 +323,32 @@ connected -- two distinct failure modes found, one fixed, one narrowed:**
      extended-frame filter (1) is now an unconditional per-frame check
      rather than a mode-gated buffering path, so heater->panel passthrough
      is immediate regardless of debug mode.
+   - **First real-hardware test of the above found a real problem,
+     specific to PUBR0**: with the display's channel diverted for the
+     full reply-wait window (as every other injected command correctly
+     does), the heater never sent a single extended-telemetry frame --
+     confirmed against a ~5-minute real capture with multiple PUBR0 sends
+     (including a manual one via the "Send debug handshake now" button),
+     zero `dev02`/`type01` frames seen. Start/Stop injection worked
+     correctly in the same capture (the heater's actual ack: `dev02`,
+     `type04`, empty payload -- notably *not* `type01`/mirroring the sent
+     command's own type, and sharing a query type with a routine display
+     exchange, which is exactly the ambiguity this whole procedure exists
+     to sidestep rather than guess at). Working theory: PUBR0 isn't a
+     discrete request/reply the way Start/Stop are -- the heater begins
+     an independent ~1/sec stream on its own schedule afterward, and
+     apparently needs the display's normal polling to keep flowing
+     uninterrupted for that to start at all; unconfirmed why exactly.
+     Fix: PUBR0 now only diverts for as long as it takes to write the
+     15-byte handshake itself, then resumes passthrough immediately
+     rather than waiting for a reply (see
+     Injector.inject_fire_and_forget()) -- whatever the heater streams
+     afterward arrives through the normal, resumed relay like any other
+     frame. Verified in simulation (a double that starts an independent
+     1/sec stream a moment after seeing PUBR0, regardless of what else is
+     happening) but **not yet re-confirmed against real hardware** -- the
+     next real capture with debug mode on should be checked for
+     `dev02`/`type01` frames actually appearing.
 
 Frame: `AA | 02 | 3a 00 | 01 | <58-byte payload> | crc16`. Indices below
 are 0-based into that 58-byte payload.
