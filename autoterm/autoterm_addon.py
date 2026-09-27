@@ -60,7 +60,7 @@ log = logging.getLogger("autoterm")
 # at startup (see main()) so a real-hardware capture always makes it obvious
 # which build is actually running, rather than needing to be inferred from
 # behavior after the fact.
-VERSION = "3.6.0"
+VERSION = "3.6.1"
 
 NODE_ID = "autoterm_heater"
 DISCOVERY_PREFIX = "homeassistant"
@@ -1950,30 +1950,36 @@ INJECT_START_TIMEOUT = 20.0
 # one read cycle, a few tens of ms), just a ceiling in case a relay thread
 # has died and will never set it.
 INJECTOR_PAUSE_CONFIRM_TIMEOUT = 2.0
+# Quiet-bus courtesy wait for send_direct() (PUBR0 only -- see its
+# docstring): how recent a frame from either device counts as "still
+# talking" (QUIET_GAP), and how long to wait for a gap before giving up and
+# writing anyway (MAX_EXTRA_WAIT). Matches the pre-3.5.0 wait_for_quiet_bus()
+# values, confirmed on real hardware over many versions.
+QUIET_GAP = 0.25
+MAX_EXTRA_WAIT = 2.0
 
 
 class _PendingInjection:
-    __slots__ = ("frame", "timeout", "log_label", "note", "wait_for_reply", "done", "reply")
+    __slots__ = ("frame", "timeout", "log_label", "note", "done", "reply")
 
-    def __init__(self, frame, timeout, log_label, note, wait_for_reply):
+    def __init__(self, frame, timeout, log_label, note):
         self.frame = frame
         self.timeout = timeout
         self.log_label = log_label
         self.note = note
-        self.wait_for_reply = wait_for_reply
         self.done = threading.Event()
         self.reply = None
 
 
 class Injector(threading.Thread):
-    """Sole path for every frame this app ever sends toward the heater --
-    Start/Stop/Preheat/Start pump and the periodic PUBR0 handshake alike --
-    replacing the old quiet-bus-wait timing heuristic and the old
-    ack-suppression heuristic (StatusModel.arm_reply_suppression() /
-    is_injection_ack_candidate(), gone as of this rewrite) with a
-    deterministic procedure:
+    """Sole path for every frame this app ever sends toward the heater.
 
-    1. A frame to send is queued (via inject() or inject_fire_and_forget()).
+    Start/Stop/Preheat/Start pump go through a deterministic divert-and-
+    replay procedure, replacing the old quiet-bus-wait timing heuristic and
+    the old ack-suppression heuristic (StatusModel.arm_reply_suppression() /
+    is_injection_ack_candidate(), gone as of the 3.5.0 rewrite):
+
+    1. A frame to send is queued (via inject()).
     2. Wait for the display's next status poll (dev03/type0f) and the
        heater's reply to it to complete naturally, and cache that reply.
     3. Pause both Relay threads -- from here on this thread is the only
@@ -1982,16 +1988,16 @@ class Injector(threading.Thread):
        cache (see INJECTOR_KNOWN_QUERY_TYPES) instead of ever forwarding
        its queries to the real heater; anything else from the display goes
        unanswered for this brief window.
-    5. Send the queued frame to the heater. inject() then waits for its
-       reply -- with the display's channel fully diverted, nothing else
-       could be talking to the heater right now, so whatever comes back is
-       unambiguously the reply to what was just sent, no guessing by frame
-       shape/timing needed the way the old heuristic had to.
-       inject_fire_and_forget() skips this wait entirely (see its
-       docstring -- needed for PUBR0, confirmed on real hardware that
-       holding the divert open for a reply prevents the heater's
-       independent extended-telemetry stream from ever starting).
-    6. Un-pause -- both relays resume immediate passthrough."""
+    5. Send the queued frame to the heater and wait for its reply -- with
+       the display's channel fully diverted, nothing else could be talking
+       to the heater right now, so whatever comes back is unambiguously the
+       reply to what was just sent, no guessing by frame shape/timing
+       needed the way the old heuristic had to.
+    6. Un-pause -- both relays resume immediate passthrough.
+
+    PUBR0 (see DebugSender) is the one exception: it goes through
+    send_direct() instead, bypassing this whole procedure -- see that
+    method's docstring for why."""
 
     def __init__(self, panel_ser, heater_ser, panel_lock, heater_lock, model, capture_log, stop_evt):
         super().__init__(daemon=True, name="injector")
@@ -2007,6 +2013,12 @@ class Injector(threading.Thread):
         self._reply_cache = {}
         self._reply_cache_lock = threading.Lock()
         self._relays = []
+        # Mutual exclusion between _perform() (runs on this thread, for
+        # queued inject() calls) and send_direct() (called directly from
+        # DebugSender's own thread, bypassing the queue) -- without this,
+        # a PUBR0 send could land mid-write during a divert-based Start/Stop
+        # injection, or vice versa, corrupting either.
+        self._op_lock = threading.Lock()
 
     # -- called by each Relay as it's constructed --------------------------
 
@@ -2033,29 +2045,58 @@ class Injector(threading.Thread):
         """Enqueues a raw frame, blocks the calling thread until it's been
         sent and the heater either replied or `timeout` elapsed. Returns
         the heater's reply frame (bytes) or None."""
-        item = _PendingInjection(frame, timeout, log_label, note, wait_for_reply=True)
+        item = _PendingInjection(frame, timeout, log_label, note)
         self.queue.put(item)
         item.done.wait(INJECT_START_TIMEOUT + timeout + 2.0)
         return item.reply
 
-    def inject_fire_and_forget(self, frame, log_label="INJECT", note=""):
-        """Like inject(), but doesn't hold the display's channel diverted
-        waiting for a reply -- pauses only for as long as it takes to
-        write the frame, then resumes passthrough immediately. For PUBR0
-        specifically: confirmed on real hardware that holding the divert
-        open for the usual reply-wait window prevents the heater's
-        extended-telemetry stream from ever starting at all (PUBR0 isn't
-        a discrete request/reply the way Start/Stop are -- the heater
-        begins an independent ~1/sec stream on its own schedule, and it
-        apparently needs the display's normal polling to keep flowing
-        uninterrupted to do that). Whatever the heater sends afterward
-        still reaches this app normally through the resumed relay -- the
-        extended frame is filtered from the panel unconditionally
-        regardless of how it arrived (see Relay's drop_extended), and
-        still decoded via note_frame() like any other frame."""
-        item = _PendingInjection(frame, 0.0, log_label, note, wait_for_reply=False)
-        self.queue.put(item)
-        item.done.wait(INJECT_START_TIMEOUT + 2.0)
+    def send_direct(self, frame, log_label="INJECT", note=""):
+        """Writes `frame` straight to the heater port under heater_lock,
+        without ever pausing or diverting the relays -- for PUBR0
+        specifically (see DebugSender), which needs different treatment
+        from every other injected command.
+
+        Real-hardware evidence (a ~17-minute capture, 18 PUBR0 sends via
+        the divert-based inject_fire_and_forget() that 3.5.1 added, zero
+        extended-telemetry frames ever seen) shows that even the briefest
+        divert -- just the instant of the write itself -- is enough to
+        stop the heater's independent ~1/sec extended-telemetry stream
+        from ever starting. Start/Stop/Preheat/Start pump don't have this
+        problem (confirmed correct against the same real captures), so
+        the issue is specific to whatever PUBR0 triggers: it apparently
+        needs the display's own polling to reach the real heater
+        completely uninterrupted right around the handshake, not just
+        eventually resumed afterward.
+
+        This mirrors exactly how PUBR0 was sent before the 3.5.0 rewrite
+        (confirmed working on real hardware across versions 1.5.0-3.4.x):
+        wait briefly for a quiet moment (QUIET_GAP/MAX_EXTRA_WAIT, reusing
+        StatusModel's per-direction frame-freshness tracking) to reduce
+        the chance of colliding with a byte the heater is mid-transmitting
+        -- heater_lock alone only serializes this app's own writes against
+        each other, it can't stop the heater's own independent
+        transmissions from colliding with ours -- then writes directly,
+        leaving the relays running the whole time. Whatever the heater
+        streams afterward arrives through the normal, never-paused relay
+        like any other frame, still unconditionally filtered from the
+        panel (see Relay's drop_extended) and still decoded via
+        note_frame() like any other frame."""
+        deadline = time.time() + MAX_EXTRA_WAIT
+        while time.time() < deadline and not self.stop_evt.is_set():
+            panel_age, heater_age = self.model.get_frame_freshness(time.time())
+            quiet = (panel_age is None or panel_age >= QUIET_GAP) and \
+                    (heater_age is None or heater_age >= QUIET_GAP)
+            if quiet:
+                break
+            time.sleep(0.05)
+
+        with self._op_lock, self.heater_lock:
+            self.heater_ser.write(frame)
+        ts = time.time()
+        tag = f"{note} " if note else ""
+        log.info("%s sent %s%s", log_label, tag, frame.hex(" "))
+        self.capture_log.raw_send(ts, "rpi", frame, note=note)
+        self.model.note_command(f"sent {tag}{frame.hex(' ')}")
 
     def run(self):
         while not self.stop_evt.is_set():
@@ -2088,15 +2129,18 @@ class Injector(threading.Thread):
         # each one's own confirmation (Relay.paused) that it has actually
         # stopped touching its port, with a bounded fallback in case a
         # relay thread has died, rather than just assuming a fixed delay
-        # was enough.
-        self.active.set()
-        deadline = time.time() + INJECTOR_PAUSE_CONFIRM_TIMEOUT
-        for relay in self._relays:
-            relay.paused.wait(timeout=max(0.0, deadline - time.time()))
-        try:
-            self._converse(item, cached_status)
-        finally:
-            self.active.clear()
+        # was enough. Held under _op_lock so a concurrent send_direct()
+        # (PUBR0, on DebugSender's own thread) can't write to heater_ser
+        # at the same time as this divert.
+        with self._op_lock:
+            self.active.set()
+            deadline = time.time() + INJECTOR_PAUSE_CONFIRM_TIMEOUT
+            for relay in self._relays:
+                relay.paused.wait(timeout=max(0.0, deadline - time.time()))
+            try:
+                self._converse(item, cached_status)
+            finally:
+                self.active.clear()
 
     def _service_panel_queries(self, panel_framer, cached_status):
         """Answers any complete display query currently sitting in
@@ -2152,13 +2196,6 @@ class Injector(threading.Thread):
         log.info("%s sent %s%s", item.log_label, tag, item.frame.hex(" "))
         self.capture_log.raw_send(ts, "rpi", item.frame, note=item.note)
         self.model.note_command(f"sent {tag}{item.frame.hex(' ')}")
-
-        if not item.wait_for_reply:
-            # Fire-and-forget (see inject_fire_and_forget): the write
-            # itself is done, resume passthrough immediately rather than
-            # holding the divert open for a reply that isn't a discrete
-            # request/reply to begin with.
-            return
 
         deadline = time.time() + item.timeout
         reply = None
@@ -2287,9 +2324,12 @@ class Commander:
 class DebugSender(threading.Thread):
     """Periodically hands the vendor diagnostic tool's PUBR0 handshake to
     the Injector, when debug mode is enabled -- unlocks the extended
-    telemetry frame decoded by decode_extended_payload() above. Sent
-    through the same deterministic injection procedure as every other
-    command now (see Injector) -- no separate timing logic needed here."""
+    telemetry frame decoded by decode_extended_payload() above. Sent via
+    Injector.send_direct(), NOT the divert-based inject() every other
+    command uses -- confirmed on real hardware that even the brief divert
+    inject() (or the fire-and-forget variant 3.5.1 tried) uses is enough to
+    stop the heater's independent extended-telemetry stream from ever
+    starting. See send_direct()'s docstring."""
 
     def __init__(self, injector, model, capture_log, stop_evt):
         super().__init__(daemon=True, name="debug-sender")
@@ -2302,7 +2342,7 @@ class DebugSender(threading.Thread):
         if self.model.get_bypass_mode():
             log.warning("BYPASS: not sending PUBR0 handshake (bypass mode enabled)")
             return
-        self.injector.inject_fire_and_forget(build_pubr0_frame(), log_label="DEBUG", note="PUBR0 handshake")
+        self.injector.send_direct(build_pubr0_frame(), log_label="DEBUG", note="PUBR0 handshake")
 
     def run(self):
         while not self.stop_evt.is_set():

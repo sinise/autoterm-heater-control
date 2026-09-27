@@ -125,15 +125,23 @@ later rewrite this is now an unconditional per-frame check rather than a
 whole-relay mode switch -- see "How commands reach the heater" below for
 what changed and why.
 
-The handshake itself now goes through the same brief-divert mechanism
-every other command uses (see "How commands reach the heater" below),
-though not identically -- it doesn't wait around for a reply the way
-Start/Stop do, since its "reply" is an independent stream rather than a
-single answer (see that section for why). The upshot for debug mode
-specifically: sending PUBR0 no longer risks corrupting the panel's own
-query/reply exchange the way it could through 2.1.0-3.4.x (see those
-CHANGELOG entries for that history) -- there's no longer a shared,
-uncoordinated write to guess the timing of.
+**The handshake is sent differently from every other command.** Start/
+Stop/Preheat/Start pump go through the brief-divert mechanism described
+in "How commands reach the heater" below -- but PUBR0 doesn't, and
+real-hardware testing showed why it can't: even the shortest possible
+divert (just the instant of the write itself, tried in 3.5.1) is enough
+to stop the heater's independent extended-telemetry stream from ever
+starting at all. It apparently needs the display's own polling to reach
+the real heater completely uninterrupted right around the handshake, not
+just resumed a moment later. So as of 3.6.1, PUBR0 is written straight to
+the heater port instead, after a brief courtesy wait for a quiet moment
+on the bus (no frame seen from either device in the last 250ms) to
+reduce the chance of colliding with a byte the heater is mid-transmitting
+-- the relays are never paused for it. This is exactly how PUBR0 was sent
+before the 3.5.0 rewrite (confirmed working on real hardware across
+1.5.0-3.4.x), and doesn't carry the collision risk 2.1.0-3.4.x's *other*
+injected commands used to have, since those still go through the divert
+mechanism.
 
 There's also a **Send debug handshake now** button, for sending exactly one
 handshake on demand instead of waiting for the periodic timer -- useful for
@@ -183,18 +191,18 @@ In practice this is a rare, self-recovering blip, not a lasting "no
 communication" state -- watch the capture log if you want to confirm this
 against your own hardware.
 
-**The PUBR0 handshake (see "Debug mode" above) is the one exception** to
-"waits for the reply in isolation": it isn't a discrete request/reply the
-way Start/Stop are -- the heater begins an independent ~1/sec extended-
-telemetry stream on its own schedule afterward, not a single answer to
-wait for. Confirmed on real hardware that holding the display's channel
-diverted for the usual reply-wait window prevented that stream from ever
-starting at all. So PUBR0 only diverts for as long as it takes to write
-the 15-byte handshake itself (well under one round of normal polling),
-then passthrough resumes immediately -- whatever the heater streams
-afterward arrives through the normal, resumed relay like any other
-frame, still unconditionally filtered from the panel and still decoded
-for the sensors below.
+**The PUBR0 handshake (see "Debug mode" above) doesn't go through this
+mechanism at all.** It isn't a discrete request/reply the way Start/Stop
+are -- the heater begins an independent ~1/sec extended-telemetry stream
+on its own schedule afterward, not a single answer to wait for. Real
+hardware testing showed that holding the display's channel diverted at
+all around the handshake -- even just for the instant of the write, which
+3.5.1 tried -- prevents that stream from ever starting. So PUBR0 is
+written directly to the heater port instead (after a brief quiet-bus
+courtesy wait), with the relays never paused for it -- whatever the
+heater streams afterward arrives through the normal, never-interrupted
+relay like any other frame, still unconditionally filtered from the panel
+and still decoded for the sensors below.
 
 **If an injected command times out with no reply**, the warning logged
 for it doesn't just say "no reply" -- it also reports how recently a

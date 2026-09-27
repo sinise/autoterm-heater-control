@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.6.1
+
+- **Fixed extended telemetry never actually starting, for real this time.**
+  A real ~17-minute capture (18 PUBR0 sends via 3.5.1's fire-and-forget
+  fix) showed zero extended-telemetry frames ever arriving, while every
+  other exchange -- including Start -- worked correctly. Root cause: it
+  isn't the *duration* of the divert-and-replay pause that breaks the
+  heater's independent extended stream, it's *any* interruption to the
+  display's polling at all, even just the instant of the write itself.
+  Fixed: PUBR0 now bypasses the Injector's divert procedure entirely via
+  a new `send_direct()` path -- a brief quiet-bus courtesy wait (reusing
+  the per-direction frame-freshness tracking added in 3.6.0), then a
+  direct locked write with the relays left running throughout, exactly
+  matching how PUBR0 was sent before the 3.5.0 rewrite (confirmed working
+  on real hardware across 1.5.0-3.4.x). Start/Stop/Preheat/Start pump are
+  unaffected -- they keep using the divert procedure, which real hardware
+  confirmed works correctly for them specifically. Not yet re-confirmed
+  against real hardware for this exact fix; the user will re-test.
+
 ## 3.6.0
 
 - **Port autodiscovery no longer bails out entirely if only the panel is
