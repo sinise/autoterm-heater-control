@@ -1216,90 +1216,156 @@ def _discover_heater_port(candidates, baud):
     return None
 
 
-def discover_ports(baud, panel_timeout=8.0):
-    """Returns (panel_port, heater_port) or None. Never sends a start/stop
-    command -- only the empty type0f status query, which is non-actuating."""
-    candidates = list_candidate_ports()
-    if len(candidates) < 2:
-        log.error("discovery: need at least 2 serial candidates, found %s", candidates)
-        return None
-
-    log.info("discovery: listening for the panel on %s (up to %.0fs)", candidates, panel_timeout)
+def _scan_for_panel(candidates, baud, panel_timeout):
     panel_port = _discover_panel_port(candidates, baud, panel_timeout)
-    if panel_port is None:
-        log.error(
-            "discovery: no dev03 (panel) frames seen on any candidate within %.0fs "
-            "-- is the panel powered and actually wired to one of these ports?",
+    if panel_port:
+        log.info("discovery: panel found on %s", panel_port)
+    else:
+        log.warning(
+            "discovery: no dev03 (panel) frame seen on any candidate within %.0fs "
+            "-- check the panel_port RX wire (white wire's panel-side stub, "
+            "carrying the panel's own TX into this app) and that the panel is powered",
             panel_timeout,
         )
-        return None
-    log.info("discovery: panel found on %s -- probing remaining ports for the heater", panel_port)
+    return panel_port
 
-    remaining = [p for p in candidates if p != panel_port]
-    heater_port = _discover_heater_port(remaining, baud)
-    if heater_port is None:
-        log.error("discovery: no dev04 (heater) reply seen on any of %s", remaining)
-        return None
 
-    # Resolved to a stable /dev/serial/by-id/* path where possible (falls
-    # back to the raw device path if the adapter has no USB serial number
-    # for udev to key on) -- what actually gets saved back to config.yaml
-    # below, so a future unrelated USB-serial device won't shift these
-    # again the way plain /dev/ttyUSB<N> numbering can.
-    by_id_panel = resolve_by_id(panel_port, baud)
-    by_id_heater = resolve_by_id(heater_port, baud)
-    if by_id_panel == panel_port or by_id_heater == heater_port:
+def _scan_for_heater(candidates, baud):
+    heater_port = _discover_heater_port(candidates, baud)
+    if heater_port:
+        log.info("discovery: heater found on %s", heater_port)
+    else:
         log.warning(
-            "discovery: no stable /dev/serial/by-id symlink found for panel=%s and/or "
-            "heater=%s (common for adapters with no USB serial number) -- saving the "
-            "raw device path instead, which can still shift if another USB-serial "
-            "device is plugged in later",
-            panel_port, heater_port,
+            "discovery: no dev04 (heater) reply to the status query on any of %s "
+            "-- check the heater_port TX wire (this app's commands into the "
+            "heater's RX, the white wire's heater-side stub) and the heater_port "
+            "RX wire (the heater's own TX back to this app, the yellow wire's "
+            "heater-side stub)",
+            candidates,
         )
-    panel_port, heater_port = by_id_panel, by_id_heater
+    return heater_port
 
-    log.info("discovery: panel=%s heater=%s", panel_port, heater_port)
+
+def discover_ports(baud, panel_timeout=8.0):
+    """Returns (panel_port, heater_port), each independently None if not
+    found -- panel discovery failing no longer skips heater discovery, so a
+    broken panel wire and a working heater (or vice versa) both still show
+    up in the log instead of one masking the other. Never sends a
+    start/stop command -- only the empty type0f status query, which is
+    non-actuating. Ports are returned as raw device paths; by-id resolution
+    happens in the caller for whichever legs were actually found."""
+    candidates = list_candidate_ports()
+    log.info("discovery: scanning %d candidate(s): %s", len(candidates), candidates or "(none)")
+
+    panel_port = _scan_for_panel(candidates, baud, panel_timeout)
+    remaining = [p for p in candidates if p != panel_port]
+    heater_port = _scan_for_heater(remaining, baud)
+
     return panel_port, heater_port
+
+
+def _resolve_found_ports(panel_port, heater_port, baud):
+    """Resolve whichever of panel_port/heater_port were actually found to a
+    stable /dev/serial/by-id/* path (falls back to the raw device path if
+    the adapter has no USB serial number for udev to key on). Leaves a
+    None leg as None."""
+    if panel_port:
+        by_id = resolve_by_id(panel_port, baud)
+        if by_id == panel_port:
+            log.warning(
+                "discovery: no stable /dev/serial/by-id symlink found for panel=%s "
+                "(common for adapters with no USB serial number) -- saving the raw "
+                "device path instead, which can still shift if another USB-serial "
+                "device is plugged in later",
+                panel_port,
+            )
+        panel_port = by_id
+    if heater_port:
+        by_id = resolve_by_id(heater_port, baud)
+        if by_id == heater_port:
+            log.warning(
+                "discovery: no stable /dev/serial/by-id symlink found for heater=%s "
+                "(common for adapters with no USB serial number) -- saving the raw "
+                "device path instead, which can still shift if another USB-serial "
+                "device is plugged in later",
+                heater_port,
+            )
+        heater_port = by_id
+    return panel_port, heater_port
+
+
+def _verify_panel(panel_port, baud, panel_timeout):
+    if _discover_panel_port([panel_port], baud, panel_timeout) == panel_port:
+        return True
+    log.info("discovery: no dev03 (panel) frame seen on configured panel_port=%s", panel_port)
+    return False
+
+
+def _verify_heater(heater_port, baud):
+    if _discover_heater_port([heater_port], baud) == heater_port:
+        return True
+    log.info("discovery: no dev04 (heater) reply seen on configured heater_port=%s", heater_port)
+    return False
 
 
 def verify_current_ports(panel_port, heater_port, baud, panel_timeout=3.0):
     """Quick check: do the ALREADY CONFIGURED ports still work? Tried before
     a full scan across every candidate -- cheaper, and avoids a needless
-    re-shuffle when nothing has actually changed. Returns True only if a
-    dev03 (panel) frame is seen on panel_port AND a dev04 (heater) reply is
-    seen on heater_port, each within its own short probe window."""
-    if not panel_port or not heater_port:
-        log.info("discovery: panel_port/heater_port not both set -- skipping the quick check")
-        return False
-    log.info(
-        "discovery: checking whether the configured panel=%s heater=%s still work "
-        "(up to %.0fs) before falling back to a full scan",
-        panel_port, heater_port, panel_timeout,
-    )
-    if _discover_panel_port([panel_port], baud, panel_timeout) != panel_port:
-        log.info("discovery: no dev03 (panel) frame seen on configured panel_port=%s", panel_port)
-        return False
-    if _discover_heater_port([heater_port], baud) != heater_port:
-        log.info("discovery: no dev04 (heater) reply seen on configured heater_port=%s", heater_port)
-        return False
-    log.info("discovery: configured panel=%s heater=%s both still work -- skipping full scan", panel_port, heater_port)
-    return True
+    re-shuffle when nothing has actually changed. Each leg is checked (and
+    logged) independently: a configured panel_port that still works is
+    reported as such even if heater_port doesn't, and vice versa. Returns
+    (panel_ok, heater_ok); an unset leg is reported not-ok without being
+    probed."""
+    panel_ok = False
+    heater_ok = False
+    if panel_port:
+        panel_ok = _verify_panel(panel_port, baud, panel_timeout)
+        log.info("discovery: panel_port %s %s", panel_port, "OK" if panel_ok else "not responding")
+    else:
+        log.info("discovery: panel_port not set -- skipping the quick check for it")
+    if heater_port:
+        heater_ok = _verify_heater(heater_port, baud)
+        log.info("discovery: heater_port %s %s", heater_port, "OK" if heater_ok else "not responding")
+    else:
+        log.info("discovery: heater_port not set -- skipping the quick check for it")
+    return panel_ok, heater_ok
 
 
 def discover_or_verify_ports(baud, current_panel=None, current_heater=None, panel_timeout=8.0):
-    """Entry point for `--discover-ports`: verify the currently configured
-    ports first (fast, and the common case -- nothing actually changed),
-    and only fall back to the full multi-candidate scan in discover_ports()
-    if that fails or nothing is configured yet. Either way, the result is
-    resolved to a stable /dev/serial/by-id/* path where possible before
-    being returned, so a verified-but-plain /dev/ttyUSB<N> path (e.g. from
-    an old manual configuration) still gets upgraded."""
-    if verify_current_ports(current_panel, current_heater, baud):
-        panel_port, heater_port = resolve_by_id(current_panel, baud), resolve_by_id(current_heater, baud)
-        log.info("discovery: panel=%s heater=%s", panel_port, heater_port)
-        return panel_port, heater_port
-    log.info("discovery: configured ports not confirmed -- running a full scan of every candidate port")
-    return discover_ports(baud, panel_timeout)
+    """Entry point for `--discover-ports`: verify each of the currently
+    configured ports first (fast, and the common case -- nothing actually
+    changed), and only fall back to a full multi-candidate scan for
+    whichever leg(s) didn't verify OK. A leg that verifies keeps its
+    current port; a leg that doesn't gets (re)discovered independently --
+    so e.g. a still-working heater_port is never disturbed just because
+    panel_port needs rediscovering, and "save whichever port was found"
+    falls out naturally. Returns (panel_port, heater_port), each
+    independently None if that leg couldn't be verified or discovered,
+    resolved to a stable /dev/serial/by-id/* path where possible."""
+    panel_ok, heater_ok = verify_current_ports(current_panel, current_heater, baud, panel_timeout)
+
+    panel_port = current_panel if panel_ok else None
+    heater_port = current_heater if heater_ok else None
+
+    if not panel_ok or not heater_ok:
+        candidates = list_candidate_ports()
+        log.info(
+            "discovery: %s not confirmed -- scanning %d candidate(s) for %s",
+            "configured ports" if not panel_ok and not heater_ok else
+            ("panel_port" if not panel_ok else "heater_port"),
+            len(candidates),
+            "both legs" if not panel_ok and not heater_ok else
+            ("panel" if not panel_ok else "heater"),
+        )
+        if not panel_ok:
+            panel_port = _scan_for_panel(candidates, baud, panel_timeout)
+        if not heater_ok:
+            remaining = [c for c in candidates if c != panel_port]
+            heater_port = _scan_for_heater(remaining, baud)
+
+    panel_port, heater_port = _resolve_found_ports(panel_port, heater_port, baud)
+    log.info("discovery: panel=%s heater=%s", panel_port or "(not found)", heater_port or "(not found)")
+    return panel_port, heater_port
 
 
 def load_persisted():
@@ -1517,6 +1583,8 @@ class StatusModel:
         self.external_temp = None
         self.external_temp_ts = None
         self.external_temp_raw_state = None
+        self.last_panel_frame_ts = None
+        self.last_heater_frame_ts = None
         persisted = load_persisted()
         self.preheat_minutes = persisted.get("preheat_minutes", preheat_minutes_default)
         self.debug_mode = persisted.get("debug_mode", debug_mode_default)
@@ -1530,6 +1598,10 @@ class StatusModel:
         type_ = raw[4] if len(raw) > 4 else None
         payload = raw[5:-2]
         with self.lock:
+            if direction == "PANEL->HEATER":
+                self.last_panel_frame_ts = ts
+            elif direction == "HEATER->PANEL":
+                self.last_heater_frame_ts = ts
             if dev == 0x04 and type_ == 0x0F and len(payload) == 18:
                 self.status = decode_status_payload(payload)
                 self.status_ts = ts
@@ -1556,6 +1628,18 @@ class StatusModel:
     def note_command(self, text):
         with self.lock:
             self.last_command = {"text": text, "ts": time.time()}
+
+    def get_frame_freshness(self, now):
+        """(panel_age, heater_age) in seconds since the last frame observed
+        FROM that side, or None if none has ever been seen. Used to tell a
+        genuine injection timeout ("heater stopped replying") apart from a
+        wiring problem ("nothing's coming from the heater at all")."""
+        with self.lock:
+            panel_ts = self.last_panel_frame_ts
+            heater_ts = self.last_heater_frame_ts
+        panel_age = (now - panel_ts) if panel_ts is not None else None
+        heater_age = (now - heater_ts) if heater_ts is not None else None
+        return panel_age, heater_age
 
     def set_bypass_mode(self, enabled):
         with self.lock:
@@ -2125,8 +2209,24 @@ class Injector(threading.Thread):
 
         item.reply = reply
         if reply is None:
-            log.warning("%s: no reply from heater within %.1fs for %s",
-                        item.log_label, item.timeout, item.frame.hex(" "))
+            panel_age, heater_age = self.model.get_frame_freshness(time.time())
+            if heater_age is not None and heater_age < STALE_AFTER:
+                wiring_hint = (
+                    "the heater is still sending recent frames, so RX (heater's TX -> "
+                    "this app, the yellow wire's heater-side stub) is fine -- check the "
+                    "heater_port TX wire instead (this app's commands -> heater's RX, "
+                    "the white wire's heater-side stub)"
+                )
+            else:
+                wiring_hint = (
+                    "no recent frames from the heater at all -- check both heater_port "
+                    "wires (RX: yellow wire's heater-side stub, TX: white wire's "
+                    "heater-side stub) and the heater's power"
+                )
+            if panel_age is not None and panel_age < STALE_AFTER:
+                wiring_hint += "; panel traffic is flowing normally, so this looks isolated to the heater side"
+            log.warning("%s: no reply from heater within %.1fs for %s -- %s",
+                        item.log_label, item.timeout, item.frame.hex(" "), wiring_hint)
 
 
 class Commander:
@@ -3185,14 +3285,18 @@ def main():
         baud = int(os.environ.get("AUTOTERM_BAUD", "2400"))
         current_panel = os.environ.get("AUTOTERM_PANEL_PORT") or None
         current_heater = os.environ.get("AUTOTERM_HEATER_PORT") or None
-        found = discover_or_verify_ports(baud, current_panel, current_heater)
-        if found is None:
+        if len(list_candidate_ports()) < 2:
+            log.error("discovery: need at least 2 serial candidates on the system to even attempt discovery")
             return 1
-        panel_port, heater_port = found
+        panel_port, heater_port = discover_or_verify_ports(baud, current_panel, current_heater)
         # Machine-parseable lines for run.sh -- logging goes to stderr, so
-        # stdout stays clean for these two.
-        print(f"PANEL_PORT={panel_port}")
-        print(f"HEATER_PORT={heater_port}")
+        # stdout stays clean for these two. A leg that wasn't found gets no
+        # line at all (rather than an empty value) so run.sh can tell "not
+        # found" apart from "found but empty" with a plain grep.
+        if panel_port:
+            print(f"PANEL_PORT={panel_port}")
+        if heater_port:
+            print(f"HEATER_PORT={heater_port}")
         return 0
 
     cfg = cfg_from_env()

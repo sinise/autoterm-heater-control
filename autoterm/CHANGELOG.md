@@ -1,5 +1,34 @@
 # Changelog
 
+## 3.6.0
+
+- **Port autodiscovery no longer bails out entirely if only the panel is
+  missing.** Previously, `discover_ports()` gave up (and never attempted
+  heater discovery at all) the moment the panel wasn't found -- so a
+  working heater connection produced zero useful log output if the panel
+  wire happened to be the one that was broken. Panel and heater discovery
+  now each run and log independently, so either half's result is visible
+  regardless of what the other half found.
+- **Each of `panel_port`/`heater_port` is now checked, discovered, and
+  saved independently**, both in the verify-current-ports quick check and
+  in the full scan. A still-working leg is left untouched (not
+  needlessly rescanned) while only the failing leg is rediscovered; a
+  leg that's found is saved even if the other one isn't, instead of the
+  previous all-or-nothing behavior that discarded a successful discovery
+  just because the other leg failed. `run.sh` saves each discovered port
+  independently to match.
+- **Discovery failures and injection timeouts now point at a specific
+  wire to check.** A failed panel/heater discovery names the exact RX/TX
+  wire (by color and side, matching the "Wiring" section below) that's
+  the likely culprit. An injected command (Start/Stop/Preheat/etc.)
+  that times out with no reply now also reports how recently a frame was
+  actually seen from the heater and the panel -- distinguishing "the
+  heater's gone quiet entirely" (check both `heater_port` wires and
+  power) from "the heater's still talking, so RX is fine, but our
+  commands aren't landing" (check `heater_port` TX specifically), with
+  panel traffic used as secondary confirmation that the panel-side wiring
+  is unaffected.
+
 ## 3.5.1
 
 - **Fixed PUBR0/extended telemetry never getting a reply, found on the

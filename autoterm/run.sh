@@ -26,18 +26,26 @@ if bashio::config.true 'autodiscover_ports'; then
     if DISCOVERY_OUT=$(python3 /app/autoterm_addon.py --discover-ports); then
         DISCOVERED_PANEL=$(echo "${DISCOVERY_OUT}" | grep '^PANEL_PORT=' | cut -d= -f2)
         DISCOVERED_HEATER=$(echo "${DISCOVERY_OUT}" | grep '^HEATER_PORT=' | cut -d= -f2)
-        if [ -n "${DISCOVERED_PANEL}" ] && [ -n "${DISCOVERED_HEATER}" ]; then
-            bashio::log.info "Using panel=${DISCOVERED_PANEL} heater=${DISCOVERED_HEATER} -- saving to app options"
+        # Each leg is saved independently -- a working heater_port is kept
+        # even if the panel couldn't be found this run, and vice versa,
+        # instead of discarding a partial result because the other leg failed.
+        if [ -n "${DISCOVERED_PANEL}" ]; then
+            bashio::log.info "Using panel=${DISCOVERED_PANEL} -- saving to app options"
             PANEL_PORT="${DISCOVERED_PANEL}"
-            HEATER_PORT="${DISCOVERED_HEATER}"
-            # Best-effort: still use the discovered ports for this run even
+            # Best-effort: still use the discovered port for this run even
             # if the Supervisor can't be updated (e.g. older bashio).
             bashio::addon.option 'panel_port' "${PANEL_PORT}" \
                 || bashio::log.warning "Could not save discovered panel_port to app options"
+        else
+            bashio::log.warning "Panel not found during discovery -- keeping configured panel_port=${PANEL_PORT}"
+        fi
+        if [ -n "${DISCOVERED_HEATER}" ]; then
+            bashio::log.info "Using heater=${DISCOVERED_HEATER} -- saving to app options"
+            HEATER_PORT="${DISCOVERED_HEATER}"
             bashio::addon.option 'heater_port' "${HEATER_PORT}" \
                 || bashio::log.warning "Could not save discovered heater_port to app options"
         else
-            bashio::log.warning "Discovery ran but produced no usable ports -- using configured panel_port/heater_port"
+            bashio::log.warning "Heater not found during discovery -- keeping configured heater_port=${HEATER_PORT}"
         fi
     else
         bashio::log.warning "Port discovery failed -- using configured panel_port=${PANEL_PORT} heater_port=${HEATER_PORT}"

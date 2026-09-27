@@ -196,6 +196,19 @@ afterward arrives through the normal, resumed relay like any other
 frame, still unconditionally filtered from the panel and still decoded
 for the sensors below.
 
+**If an injected command times out with no reply**, the warning logged
+for it doesn't just say "no reply" -- it also reports how recently a
+frame was actually seen from the heater and the panel, and points at a
+specific wire pair to check. If the heater has been sending frames
+recently, the RX pair (heater's own TX into this app) is ruled out and
+the message points specifically at the `heater_port` TX wire (this
+app's commands into the heater's RX); if nothing has been seen from the
+heater at all, it says to check both `heater_port` wires and the
+heater's power. When the panel's own traffic is still flowing normally
+at the same time, that's called out too, since it narrows the problem
+to the heater side of the wiring rather than something wrong with this
+app or its power in general.
+
 ## Heater profile: other models
 
 The extended telemetry frame's field formulas (byte offsets, state/mode
@@ -391,41 +404,55 @@ bitten this exact project before (see docs/PROTOCOL.md's device-role
 history note). Turning on `autodiscover_ports` runs a check at every
 startup instead of blindly trusting the configured device paths:
 
-0. **Check the currently configured ports first** -- a few-second check
-   for a dev03 (panel) frame on `panel_port` and a dev04 (heater) reply on
-   `heater_port`. If both still check out (the common case -- nothing
-   plugged in/out since last time), that's it, no full scan needed. Only
-   if that fails (or `panel_port`/`heater_port` are unset) does it move on
-   to a full scan:
+0. **Check each currently configured port first, independently** -- a
+   few-second check for a dev03 (panel) frame on `panel_port` and,
+   separately, a dev04 (heater) reply on `heater_port`. A leg that still
+   checks out (the common case -- nothing plugged in/out since last time)
+   is kept as-is; only the leg(s) that don't check out (or aren't set
+   yet) move on to a full scan. So if, say, `heater_port` is still fine
+   but `panel_port` isn't, only the panel side gets rescanned -- the
+   still-working heater connection is left alone.
 1. **Find the panel** -- listen (read-only) on every `/dev/ttyUSB*` and
    `/dev/ttyACM*` device at once, up to 8 seconds, for a valid frame from
    dev03. The panel appears to report its cabin temperature on its own,
    without needing anything from the heater side, so this works from pure
-   listening.
+   listening. If nothing is heard, the app logs that specifically --
+   including a pointer at the `panel_port` RX wire (the white wire's
+   panel-side stub, carrying the panel's own TX into this app) -- and
+   still goes on to attempt heater discovery below, rather than giving up
+   entirely.
 2. **Find the heater** -- on each remaining candidate, send the empty
    type0f status query (the one documented, non-actuating "poll" the panel
    itself sends -- see `docs/PROTOCOL.md`) and listen for the heater's
    18-byte dev04 reply. **Only this empty query is ever sent during
    discovery -- never a start (`type01`/`type02`) or stop (`type03`)
    command**, since those actually move the heater's state machine and must
-   never be used just to probe a port.
+   never be used just to probe a port. If nothing replies, the app logs
+   that too, pointing at both `heater_port` wires (TX: this app's
+   commands into the heater's RX; RX: the heater's own TX back into this
+   app) as the things to check.
 
-If both are found, each is resolved to its stable `/dev/serial/by-id/*`
-symlink where one exists (tied to that specific adapter's USB vendor/
-product/serial number, not plug-order) before being saved back into this
-app's own configuration -- so unlike plugging in some unrelated
-USB-serial device and having `/dev/ttyUSB<N>` numbering shift under you
-again, a `by-id` path keeps pointing at the same physical adapter no
-matter what else gets plugged in later. If an adapter has no USB serial
-number for udev to key on (some cheap chipsets don't), there's no `by-id`
-symlink to resolve to -- the app logs a warning and saves the raw
-`/dev/ttyUSB<N>` path instead, same as before, which can still shift.
+**Each leg -- panel and heater -- is found, resolved, and saved
+independently of the other.** A leg that's found is resolved to its
+stable `/dev/serial/by-id/*` symlink where one exists (tied to that
+specific adapter's USB vendor/product/serial number, not plug-order)
+before being saved back into this app's own configuration -- so unlike
+plugging in some unrelated USB-serial device and having `/dev/ttyUSB<N>`
+numbering shift under you again, a `by-id` path keeps pointing at the
+same physical adapter no matter what else gets plugged in later. If an
+adapter has no USB serial number for udev to key on (some cheap chipsets
+don't), there's no `by-id` symlink to resolve to -- the app logs a
+warning and saves the raw `/dev/ttyUSB<N>` path instead, same as before,
+which can still shift. A leg that *isn't* found is left at whatever was
+previously configured for it (with a clear log line saying so) instead
+of blocking the other, successfully-found leg from being saved -- so a
+broken panel connection with a perfectly healthy heater connection (or
+vice versa) still gets you a saved, working heater_port/panel_port and a
+specific wire to go check for the other, rather than an all-or-nothing
+failure that tells you nothing about which half is actually broken.
 Either way, the Configuration tab reflects what was actually found and
 used for that run, and you can turn `autodiscover_ports` back off
-afterward once it's saved a `by-id` path. If either discovery step fails
-(nothing found within the timeout), the app logs why and falls back to
-whatever `panel_port`/`heater_port` are currently configured -- it never
-refuses to start over a failed discovery.
+afterward once it's saved `by-id` paths for both legs.
 
 **Note:** since `autodiscover_ports` is a config option, not a live
 toggle, a saved change only takes effect on the *next* app start --
