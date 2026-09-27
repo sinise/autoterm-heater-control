@@ -56,6 +56,12 @@ from autoterm_protocol import Framer, KNOWN_DEV, crc_bytes
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("autoterm")
 
+# Mirrors config.yaml's `version:` -- keep both in sync on every bump. Logged
+# at startup (see main()) so a real-hardware capture always makes it obvious
+# which build is actually running, rather than needing to be inferred from
+# behavior after the fact.
+VERSION = "3.6.0"
+
 NODE_ID = "autoterm_heater"
 DISCOVERY_PREFIX = "homeassistant"
 STATE_TOPIC = f"autoterm/{NODE_ID}/state"
@@ -3281,6 +3287,7 @@ def cfg_from_env():
 
 
 def main():
+    log.info("Autoterm Heater v%s starting", VERSION)
     if "--discover-ports" in sys.argv:
         baud = int(os.environ.get("AUTOTERM_BAUD", "2400"))
         current_panel = os.environ.get("AUTOTERM_PANEL_PORT") or None

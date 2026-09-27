@@ -28,6 +28,13 @@
   commands aren't landing" (check `heater_port` TX specifically), with
   panel traffic used as secondary confirmation that the panel-side wiring
   is unaffected.
+- **Logs the running version at startup** (`Autoterm Heater v3.6.0
+  starting`, first line every run) -- prompted by a real debug capture
+  that looked exactly like the pre-3.5.1 PUBR0 bug (a 2.0s "no reply"
+  timeout on every PUBR0 send) but turned out to just be a stale
+  install still on 3.5.0, several versions behind. There was previously
+  no way to tell "still running old code" apart from "new regression"
+  from the log alone.
 
 ## 3.5.1
 
